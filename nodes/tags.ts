@@ -1,4 +1,4 @@
-declare enum NodeTag {
+export enum NodeTag {
 	T_Invalid = 'T_Invalid',
 
 	/*

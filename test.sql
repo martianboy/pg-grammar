@@ -1,1 +1,1 @@
-abbas /* this should be ignored */
+abbas; aaa /* this should be ignored /* nested comments **/ */

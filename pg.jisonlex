@@ -57,7 +57,7 @@
 /*
  * In order to make the world safe for Windows and Mac clients as well as
  * Unix ones, we accept either \n or \r as a newline.  A DOS-style \r\n
- * sequence will be seen as two successive newlines, but that doesn't cause
+ * sequence will be seen as two successive newlines, but that does not cause
  * any problems.  Comments that start with -- and extend to the next
  * newline are treated as equivalent to a single whitespace character.
  *
@@ -166,7 +166,7 @@ identifier		{ident_start}{ident_cont}*
 
 typecast		"::"
 dot_dot			\.\.
-colon_equals	":="
+colon_equals	":="		/* " */
 
 equals_greater	"=>"
 less_equals		"<="
@@ -174,6 +174,16 @@ greater_equals	">="
 less_greater	"<>"
 not_equals		"!="
 
+/*
+ * "self" is the set of chars that should be returned as single-character
+ * tokens.  "op_chars" is the set of chars that can make up "Op" tokens,
+ * which can be one or more characters long (but if a single-char token
+ * appears in the "self" set, it is not to be returned as an Op).  Note
+ * that the sets overlap, but each has some chars that are not in the other.
+ *
+ * If you change either set, adjust the character lists appearing in the
+ * rule for "operator"!
+ */
 self			[,()\[\].;\:\+\-\*\/\%\^\<\>\=]
 op_chars		[\~\!\@\#\^\&\|\`\?\+\-\*\/\%\<\>\=]
 operator		{op_chars}+
@@ -196,10 +206,25 @@ other			.
 				}
 
 {xcstart}		{
+					yy.extra.xcdepth = 0;
+					console.log('yy.extra.xcdepth = 0;');
 					this.begin('xc');
+					// lexer.less(2);
+				}
+<xc>{xcstart}	{
+					yy.extra.xcdepth++;
+					console.log('yy.extra.xcdepth++;');
+					/* Put back any characters past slash-star; see above */
+					// yyless(2);
 				}
 <xc>{xcstop}	{
-					this.popState();
+					if (yy.extra.xcdepth <= 0) {
+						this.popState();
+						console.log('this.popState();');
+					} else {
+						yy.extra.xcdepth--;
+						console.log('yy.extra.xcdepth--;');
+					}
 				}
 
 <xc>{xcinside}	{
@@ -212,6 +237,183 @@ other			.
 
 <xc>\*+			{
 					/* ignore */
+				}
+
+<xc><<EOF>>		{
+					throw new Error('unterminated /* comment');
+				}
+
+{typecast}		{
+					return 'TYPECAST';
+				}
+
+{dot_dot}		{
+					return 'DOT_DOT';
+				}
+
+{colon_equals}	{
+					return 'COLON_EQUALS';
+				}
+
+{equals_greater} {
+					return 'EQUALS_GREATER';
+				}
+
+{less_equals}	{
+					return 'LESS_EQUALS';
+				}
+
+{greater_equals} {
+					return 'GREATER_EQUALS';
+				}
+
+{less_greater}	{
+					/* We accept both "<>" and "!=" as meaning NOT_EQUALS */
+					return 'NOT_EQUALS';
+				}
+
+{not_equals}	{
+					/* We accept both "<>" and "!=" as meaning NOT_EQUALS */
+					return 'NOT_EQUALS';
+				}
+
+{self}          {
+					// SET_YYLLOC();
+					return yytext[0];
+				}
+
+{operator}		{
+					console.log('LEXER: operator');
+
+					/*
+					* Check for embedded slash-star or dash-dash; those
+					* are comment starts, so operator must stop there.
+					* Note that slash-star or dash-dash at the first
+					* character will match a prior rule, not this one.
+					*/
+					let	nchars = yyleng;
+					let slashstar = yytext.indexOf("/*");
+					let dashdash = yytext.indexOf("--");
+
+					if (slashstar > -1 && dashdash > -1)
+					{
+						/* if both appear, take the first one */
+						if (slashstar > dashdash)
+							slashstar = dashdash;
+					}
+					else if (slashstar < 0)
+						slashstar = dashdash;
+					if (slashstar > -1)
+						nchars = slashstar;
+
+					/*
+					* For SQL compatibility, '+' and '-' cannot be the
+					* last char of a multi-char operator unless the operator
+					* contains chars that are not in SQL operators.
+					* The idea is to lex '=-' as two operators, but not
+					* to forbid operator names like '?-' that could not be
+					* sequences of SQL operators.
+					*/
+					if (nchars > 1 &&
+						(yytext[nchars - 1] == '+' ||
+						yytext[nchars - 1] == '-'))
+					{
+						let	ic;
+
+						for (ic = nchars - 2; ic >= 0; ic--)
+						{
+							let c = yytext[ic];
+							if (c == '~' || c == '!' || c == '@' ||
+								c == '#' || c == '^' || c == '&' ||
+								c == '|' || c == '`' || c == '?' ||
+								c == '%')
+								break;
+						}
+						if (ic < 0)
+						{
+							/*
+							* didn't find a qualifying character, so remove
+							* all trailing [+-]
+							*/
+							do {
+								nchars--;
+							} while (nchars > 1 &&
+								(yytext[nchars - 1] == '+' ||
+								yytext[nchars - 1] == '-'));
+						}
+					}
+
+					// SET_YYLLOC();
+
+					if (nchars < yyleng)
+					{
+						/* Strip the unwanted chars from the token */
+						this.less(nchars);
+						/*
+						* If what we have left is only one char, and it's
+						* one of the characters matching "self", then
+						* return it as a character token the same way
+						* that the "self" rule would have.
+						*/
+						if (nchars == 1 &&
+							",()[].;:+-*/%^<>=".includes(yytext[0]))
+							return yytext[0];
+						/*
+						* Likewise, if what we have left is two chars, and
+						* those match the tokens ">=", "<=", "=>", "<>" or
+						* "!=", then we must return the appropriate token
+						* rather than the generic Op.
+						*/
+						if (nchars == 2)
+						{
+							if (yytext[0] == '=' && yytext[1] == '>')
+								return 'EQUALS_GREATER';
+							if (yytext[0] == '>' && yytext[1] == '=')
+								return 'GREATER_EQUALS';
+							if (yytext[0] == '<' && yytext[1] == '=')
+								return 'LESS_EQUALS';
+							if (yytext[0] == '<' && yytext[1] == '>')
+								return 'NOT_EQUALS';
+							if (yytext[0] == '!' && yytext[1] == '=')
+								return 'NOT_EQUALS';
+						}
+					}
+
+					/*
+					* Complain if operator is too long.  Unlike the case
+					* for identifiers, we make this an error not a notice-
+					* and-truncate, because the odds are we are looking at
+					* a syntactic mistake anyway.
+					*/
+					if (nchars >= 64)
+						throw new Error("operator too long");
+
+					// yylval->str = pstrdup(yytext);
+					return 'Op';
+				}
+
+
+{param}			{
+					return 'PARAM';
+				}
+
+{integer}		{
+					return 'ICONST'
+					// return process_integer_literal(yytext, yylval);
+				}
+{decimal}		{
+					// yylval->str = pstrdup(yytext);
+					return 'FCONST';
+				}
+{decimalfail}	{
+					/* throw back the .., and treat as integer */
+					lexer.less(yyleng - 2);
+					// return process_integer_literal(yytext, yylval);
+					return 'ICONST';
+				}
+{real}			{
+					// yylval->str = pstrdup(yytext);
+					return 'FCONST';
 				}
 
 {identifier}	{
@@ -232,6 +434,11 @@ other			.
 					const ident = yytext.toLowerCase().trim()
 					// yylval->str = ident;
 					return 'IDENT';
+				}
+
+{other}			{
+					// SET_YYLLOC();
+					return yytext[0];
 				}
 
 <<EOF>>         {
