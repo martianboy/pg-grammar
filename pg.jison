@@ -567,7 +567,7 @@ stmtmulti:	stmtmulti ';' stmt
 				}
 		;
 
-stmt:       c_expr;
+stmt:       a_expr;
 
 
 columnref:	ColId
