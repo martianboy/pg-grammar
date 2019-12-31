@@ -4,4 +4,4 @@ ts:
 	npx tsc
 
 parser:
-	npx jison pg.jison pg.jisonlex
+	./node_modules/.bin/jison pg.jison pg.jisonlex

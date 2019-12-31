@@ -1,7 +1,6 @@
 %option reentrant
 %option bison-bridge
 %option bison-locations
-%option 8bit
 %option never-interactive
 %option nodefault
 %option noinput
@@ -12,6 +11,32 @@
 %option noyyfree
 %option warn
 %option prefix="core_yy"
+
+%{
+
+/*
+ * GUC variables.  This is a DIRECT violation of the warning given at the
+ * head of gram.y, ie flex/bison code must not depend on any GUC variables;
+ * as such, changing their values can induce very unintuitive behavior.
+ * But we shall have to live with it until we can remove these variables.
+ */
+const		backslash_quote = 2; // BACKSLASH_QUOTE_SAFE_ENCODING
+const		escape_string_warning = true;
+const		standard_conforming_strings = true;
+
+function process_integer_literal(token, lval) {
+	let val = parseInt(token);
+
+	if (val.toString().length < token.length) {
+		lval.str = token;
+		return 'FCONST';
+	}
+
+	lval.ival = val;
+	return 'ICONST';
+}
+
+%}
 
 /*
  * OK, here is a short description of lex/flex rules behavior.
@@ -101,7 +126,7 @@ whitespace_with_newline	({horiz_whitespace}*{newline}{special_whitespace}*)
  * The actions for {quotestop} and {quotefail} must throw back characters
  * beyond the quote proper.
  */
-quote			'
+quote			\'
 quotestop		{quote}{whitespace}*
 quotecontinue	{quote}{whitespace_with_newline}{quote}
 quotefail		{quote}{whitespace}*"-"
@@ -207,23 +232,19 @@ other			.
 
 {xcstart}		{
 					yy.extra.xcdepth = 0;
-					console.log('yy.extra.xcdepth = 0;');
 					this.begin('xc');
-					// lexer.less(2);
+					this.less(2);
 				}
 <xc>{xcstart}	{
 					yy.extra.xcdepth++;
-					console.log('yy.extra.xcdepth++;');
 					/* Put back any characters past slash-star; see above */
-					// yyless(2);
+					this.less(2);
 				}
 <xc>{xcstop}	{
 					if (yy.extra.xcdepth <= 0) {
 						this.popState();
-						console.log('this.popState();');
 					} else {
 						yy.extra.xcdepth--;
-						console.log('yy.extra.xcdepth--;');
 					}
 				}
 
@@ -242,6 +263,97 @@ other			.
 <xc><<EOF>>		{
 					throw new Error('unterminated /* comment');
 				}
+
+{xqstart}		{
+					console.log('LEXER: xqstart');
+
+					yy.extra.warn_on_first_escape = true;
+					yy.extra.saw_non_ascii = false;
+					// SET_YYLLOC();
+					if (yy.extra.standard_conforming_strings)
+						this.begin('xq');
+					else
+						this.begin('xe');
+
+					yy.extra.literalbuf = '';
+					yy.extra.literallen = 0;
+				}
+{xestart}		{
+					yy.extra.warn_on_first_escape = false;
+					yy.extra.saw_non_ascii = false;
+					// SET_YYLLOC();
+					this.begin('xe');
+					yy.extra.literalbuf = '';
+					yy.extra.literallen = 0;
+				}
+{xusstart}		{
+					// SET_YYLLOC();
+					if (!yy.extra.standard_conforming_strings)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("unsafe use of string constant with Unicode escapes"),
+								 errdetail("String constants with Unicode escapes cannot be used when standard_conforming_strings is off."),
+								 lexer_errposition()));
+					this.begin('xus');
+					yy.extra.literallen = 0;
+					yy.extra.literalbuf = '';
+				}
+<xq,xe>{quotestop} {
+					this.less(1);
+					this.popState();
+					/*
+					 * check that the data remains valid if it might have been
+					 * made invalid by unescaping any chars.
+					 */
+					// if (yy.extra.saw_non_ascii)
+					// 	pg_verifymbstr(yy.extra.literalbuf,
+					// 				   yy.extra.literallen,
+					// 				   false);
+					yy.lval.str = yy.extra.literalbuf;
+					return 'SCONST';
+				}
+<xq,xe>{quotefail} {
+					this.less(1);
+					this.popState();
+					/*
+					 * check that the data remains valid if it might have been
+					 * made invalid by unescaping any chars.
+					 */
+					// if (yy.extra.saw_non_ascii)
+					// 	pg_verifymbstr(yy.extra.literalbuf,
+					// 				   yy.extra.literallen,
+					// 				   false);
+					yy.lval.str = yy.extra.literalbuf;
+					return 'SCONST';
+				}
+<xus>{quotestop} {
+					/* throw back all but the quote */
+					this.less(1);
+					/* xusend state looks for possible UESCAPE */
+					this.begin('xusend');
+				}
+<xus>{quotefail} {
+					/* throw back all but the quote */
+					this.less(1);
+					/* xusend state looks for possible UESCAPE */
+					this.begin('xusend');
+				}
+<xusend>{whitespace} {
+					/* stay in xusend state over whitespace */
+				}
+
+<xq,xe,xus>{xqdouble} {
+					yy.extra.literalbuf += "'";
+				}
+<xq,xus>{xqinside}  {
+					yy.extra.literalbuf += yytext;
+				}
+
+<xq,xe,xus>{quotecontinue} {
+					/* ignore */
+				}
+
+<xq,xe,xus><<EOF>>		{ throw new Error("unterminated quoted string"); }
 
 {typecast}		{
 					return 'TYPECAST';
@@ -388,7 +500,7 @@ other			.
 					if (nchars >= 64)
 						throw new Error("operator too long");
 
-					// yylval->str = pstrdup(yytext);
+					yy.lval.str = yytext;
 					return 'Op';
 				}
 
@@ -398,41 +510,37 @@ other			.
 				}
 
 {integer}		{
-					return 'ICONST'
-					// return process_integer_literal(yytext, yylval);
+					return process_integer_literal(yytext, yy.lval);
 				}
 {decimal}		{
-					// yylval->str = pstrdup(yytext);
+					yy.lval.str = pstrdup(yytext);
 					return 'FCONST';
 				}
 {decimalfail}	{
 					/* throw back the .., and treat as integer */
-					lexer.less(yyleng - 2);
-					// return process_integer_literal(yytext, yylval);
-					return 'ICONST';
+					this.less(yyleng - 2);
+					return process_integer_literal(yytext, yy.lval);
 				}
 {real}			{
-					// yylval->str = pstrdup(yytext);
-					return 'FCONST';
+					yy.lval.str = yytext;
 				}
 
 {identifier}	{
 					/* Is it a keyword? */
-					// kwnum = ScanKeywordLookup(yytext);
-					// if (kwnum >= 0)
-					// {
-					// 	yylval->keyword = GetScanKeyword(kwnum,
-					// 									 yyextra->keywordlist);
-					// 	return yyextra->keyword_tokens[kwnum];
-					// }
+					let kwnum = yy.nodes.ScanKeywordLookup(yytext);
+					if (kwnum >= 0)
+					{
+						yy.lval.keyword = yy.nodes.GetScanKeyword(kwnum,
+														 yy.extra.keywordlist);
+						return yy.extra.keyword;
+					}
 
 					/*
 					 * No.  Convert the identifier to lower case, and truncate
 					 * if necessary.
 					 */
-					console.log('LEXER: IDENT')
-					const ident = yytext.toLowerCase().trim()
-					// yylval->str = ident;
+					yytext = yytext.toLowerCase().trim()
+					yy.lval.str = yytext;
 					return 'IDENT';
 				}
 
@@ -442,6 +550,5 @@ other			.
 				}
 
 <<EOF>>         {
-	console.log('LEXER: EOF')
 	// return 'EOF'
 }
