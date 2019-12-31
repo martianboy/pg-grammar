@@ -532,7 +532,7 @@ other			.
 					{
 						yy.lval.keyword = yy.nodes.GetScanKeyword(kwnum,
 														 yy.extra.keywordlist);
-						return yy.extra.keyword;
+						return yy.lval.keyword;
 					}
 
 					/*
