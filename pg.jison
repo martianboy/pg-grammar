@@ -1,3 +1,7 @@
+%code imports {
+	const _ = require('./src');
+}
+
 %{
 function makeRawStmt(stmt, stmt_location) {
 	return {
@@ -572,26 +576,26 @@ stmt:       a_expr;
 
 columnref:	ColId
 				{
-					$$ = yy.nodes.makeColumnRef($1, null, @1, null /* yyscanner */);
+					$$ = _.makeColumnRef($1, null, @1, null /* yyscanner */);
 				}
 			| ColId indirection
 				{
-					$$ = yy.nodes.makeColumnRef($1, $2, @1, null /* yyscanner */);
+					$$ = _.makeColumnRef($1, $2, @1, null /* yyscanner */);
 				}
 		;
 
 indirection_el:
 			'.' attr_name
 				{
-					$$ = yy.nodes.makeString($2);
+					$$ = _.makeString($2);
 				}
 			| '.' '*'
 				{
-					$$ = yy.nodes.makeNode('A_Star');
+					$$ = _.makeNode('A_Star');
 				}
 			| '[' a_expr ']'
 				{
-					const ai = yy.nodes.makeNode('A_Indices');
+					const ai = _.makeNode('A_Indices');
 					ai.is_slice = false;
 					ai.lidx = null;
 					ai.uidx = $2;
@@ -599,7 +603,7 @@ indirection_el:
 				}
 			| '[' opt_slice_bound ':' opt_slice_bound ']'
 				{
-					ai = yy.nodes.makeNode('A_Indices');
+					ai = _.makeNode('A_Indices');
 					ai.is_slice = true;
 					ai.lidx = $2;
 					ai.uidx = $4;
@@ -659,7 +663,8 @@ func_arg_list:  func_arg_expr
 				}
 			| func_arg_list ',' func_arg_expr
 				{
-					$$ = $1.push($3);
+					$1.push($3);
+					$$ = $1;
 				}
 		;
 
@@ -672,7 +677,7 @@ func_arg_list:  func_arg_expr
  * ever implement SQL99-like methods, such syntax may actually become legal!)
  */
 func_name:	type_function_name
-					{ $$ = [yy.nodes.makeString($1)]; }
+					{ $$ = [_.makeString($1)]; }
 			| ColId indirection
 					{
 						$$ = check_func_name(lcons(makeString($1), $2),
@@ -686,19 +691,19 @@ func_name:	type_function_name
  */
 AexprConst: Iconst
 				{
-					$$ = yy.nodes.makeIntConst($1, @1);
+					$$ = _.makeIntConst($1, @1);
 				}
 			| FCONST
 				{
-					$$ = yy.nodes.makeFloatConst($1, @1);
+					$$ = _.makeFloatConst($1, @1);
 				}
 			| Sconst
 				{
-					$$ = yy.nodes.makeStringConst($1, @1);
+					$$ = _.makeStringConst($1, @1);
 				}
 			| BCONST
 				{
-					$$ = yy.nodes.makeBitStringConst($1, @1);
+					$$ = _.makeBitStringConst($1, @1);
 				}
 			| XCONST
 				{
@@ -707,43 +712,43 @@ AexprConst: Iconst
 					 * a <general literal> shall not be a
 					 * <bit string literal> or a <hex string literal>.
 					 */
-					$$ = yy.nodes.makeBitStringConst($1, @1);
+					$$ = _.makeBitStringConst($1, @1);
 				}
 			| func_name Sconst
 				{
 					/* generic type 'literal' syntax */
-					var t = yy.nodes.makeTypeNameFromNameList($1);
+					var t = _.makeTypeNameFromNameList($1);
 					t.location = @1;
-					$$ = yy.nodes.makeStringConstCast($2, @2, t);
+					$$ = _.makeStringConstCast($2, @2, t);
 				}
 			| ConstTypename Sconst
 				{
-					$$ = yy.nodes.makeStringConstCast($2, @2, $1);
+					$$ = _.makeStringConstCast($2, @2, $1);
 				}
 			| ConstInterval Sconst opt_interval
 				{
 					var t = $1;
 					t.typmods = $3;
-					$$ = yy.nodes.makeStringConstCast($2, @2, t);
+					$$ = _.makeStringConstCast($2, @2, t);
 				}
 			| ConstInterval '(' Iconst ')' Sconst
 				{
 					var t = $1;
-					t.typmods = [yy.nodes.makeIntConst(INTERVAL_FULL_RANGE, -1),
+					t.typmods = [_.makeIntConst(INTERVAL_FULL_RANGE, -1),
 											makeIntConst($3, @3)];
-					$$ = yy.nodes.makeStringConstCast($5, @5, t);
+					$$ = _.makeStringConstCast($5, @5, t);
 				}
 			| TRUE_P
 				{
-					$$ = yy.nodes.makeBoolAConst(true, @1);
+					$$ = _.makeBoolAConst(true, @1);
 				}
 			| FALSE_P
 				{
-					$$ = yy.nodes.makeBoolAConst(false, @1);
+					$$ = _.makeBoolAConst(false, @1);
 				}
 			| NULL_P
 				{
-					$$ = yy.nodes.makeNullAConst(@1);
+					$$ = _.makeNullAConst(@1);
 				}
 		;
 
@@ -756,6 +761,71 @@ SignedIconst: Iconst								{ $$ = $1; }
 		;
 
 
+all_Op:		Op										{ $$ = $1; }
+			| MathOp								{ $$ = $1; }
+		;
+
+MathOp:		 '+'									{ $$ = "+"; }
+			| '-'									{ $$ = "-"; }
+			| '*'									{ $$ = "*"; }
+			| '/'									{ $$ = "/"; }
+			| '%'									{ $$ = "%"; }
+			| '^'									{ $$ = "^"; }
+			| '<'									{ $$ = "<"; }
+			| '>'									{ $$ = ">"; }
+			| '='									{ $$ = "="; }
+			| LESS_EQUALS							{ $$ = "<="; }
+			| GREATER_EQUALS						{ $$ = ">="; }
+			| NOT_EQUALS							{ $$ = "<>"; }
+		;
+
+qual_Op:	Op
+					{ $$ = [_.makeString($1)]; }
+			| OPERATOR '(' any_operator ')'
+					{ $$ = $3; }
+		;
+
+qual_all_Op:
+			all_Op
+					{ $$ = [_.makeString($1)]; }
+			| OPERATOR '(' any_operator ')'
+					{ $$ = $3; }
+		;
+
+subquery_Op:
+			all_Op
+					{ $$ = [_.makeString($1)]; }
+			| OPERATOR '(' any_operator ')'
+					{ $$ = $3; }
+			| LIKE
+					{ $$ = [_.makeString("~~")]; }
+			| NOT_LA LIKE
+					{ $$ = [_.makeString("!~~")]; }
+			| ILIKE
+					{ $$ = [_.makeString("~~*")]; }
+			| NOT_LA ILIKE
+					{ $$ = [_.makeString("!~~*")]; }
+/* cannot put SIMILAR TO here, because SIMILAR TO is a hack.
+ * the regular expression is preprocessed by a function (similar_to_escape),
+ * and the ~ operator for posix regular expressions is used.
+ *        x SIMILAR TO y     ->    x ~ similar_to_escape(y)
+ * this transformation is made on the fly by the parser upwards.
+ * however the SubLink structure which handles any/some/all stuff
+ * is not ready for such a thing.
+ */
+			;
+
+expr_list:	a_expr
+				{
+					$$ = [$1];
+				}
+			| expr_list ',' a_expr
+				{
+					$1.push($3);
+					$$ = $1;
+				}
+		;
+
 /*
  * Productions that can be used in both a_expr and b_expr.
  *
@@ -766,6 +836,347 @@ SignedIconst: Iconst								{ $$ = $1; }
  */
 c_expr:		columnref								{ $$ = $1; }
 			| AexprConst							{ $$ = $1; }
+		;
+
+
+/*
+ * SQL numeric data types
+ */
+Numeric:	INT_P
+				{
+					$$ = _.SystemTypeName("int4");
+					$$.location = @1;
+				}
+			| INTEGER
+				{
+					$$ = _.SystemTypeName("int4");
+					$$.location = @1;
+				}
+			| SMALLINT
+				{
+					$$ = _.SystemTypeName("int2");
+					$$.location = @1;
+				}
+			| BIGINT
+				{
+					$$ = _.SystemTypeName("int8");
+					$$.location = @1;
+				}
+			| REAL
+				{
+					$$ = _.SystemTypeName("float4");
+					$$.location = @1;
+				}
+			| FLOAT_P opt_float
+				{
+					$$ = $2;
+					$$.location = @1;
+				}
+			| DOUBLE_P PRECISION
+				{
+					$$ = _.SystemTypeName("float8");
+					$$.location = @1;
+				}
+			| DECIMAL_P opt_type_modifiers
+				{
+					$$ = _.SystemTypeName("numeric");
+					$$.typmods = $2;
+					$$.location = @1;
+				}
+			| DEC opt_type_modifiers
+				{
+					$$ = _.SystemTypeName("numeric");
+					$$.typmods = $2;
+					$$.location = @1;
+				}
+			| NUMERIC opt_type_modifiers
+				{
+					$$ = _.SystemTypeName("numeric");
+					$$.typmods = $2;
+					$$.location = @1;
+				}
+			| BOOLEAN_P
+				{
+					$$ = _.SystemTypeName("bool");
+					$$.location = @1;
+				}
+		;
+
+opt_float:	'(' Iconst ')'
+				{
+					/*
+					 * Check FLOAT() precision limits assuming IEEE floating
+					 * types - thomas 1997-09-18
+					 */
+					if ($2 < 1)
+						ereport(ERROR,
+								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+								 errmsg("precision for type float must be at least 1 bit"),
+								 parser_errposition(@2)));
+					else if ($2 <= 24)
+						$$ = _.SystemTypeName("float4");
+					else if ($2 <= 53)
+						$$ = _.SystemTypeName("float8");
+					else
+						ereport(ERROR,
+								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+								 errmsg("precision for type float must be less than 54 bits"),
+								 parser_errposition(@2)));
+				}
+			| /*EMPTY*/
+				{
+					$$ = _.SystemTypeName("float8");
+				}
+		;
+
+/*
+ * SQL bit-field data types
+ * The following implements BIT() and BIT VARYING().
+ */
+Bit:		BitWithLength
+				{
+					$$ = $1;
+				}
+			| BitWithoutLength
+				{
+					$$ = $1;
+				}
+		;
+
+/* ConstBit is like Bit except "BIT" defaults to unspecified length */
+/* See notes for ConstCharacter, which addresses same issue for "CHAR" */
+ConstBit:	BitWithLength
+				{
+					$$ = $1;
+				}
+			| BitWithoutLength
+				{
+					$$ = $1;
+					$$.typmods = null;
+				}
+		;
+
+BitWithLength:
+			BIT opt_varying '(' expr_list ')'
+				{
+					char *typname;
+
+					typname = $2 ? "varbit" : "bit";
+					$$ = _.SystemTypeName(typname);
+					$$.typmods = $4;
+					$$.location = @1;
+				}
+		;
+
+BitWithoutLength:
+			BIT opt_varying
+				{
+					/* bit defaults to bit(1), varbit to no limit */
+					if ($2)
+					{
+						$$ = _.SystemTypeName("varbit");
+					}
+					else
+					{
+						$$ = _.SystemTypeName("bit");
+						$$.typmods = [_.makeIntConst(1, -1)];
+					}
+					$$.location = @1;
+				}
+		;
+
+
+/*
+ * SQL character data types
+ * The following implements CHAR() and VARCHAR().
+ */
+Character:  CharacterWithLength
+				{
+					$$ = $1;
+				}
+			| CharacterWithoutLength
+				{
+					$$ = $1;
+				}
+		;
+
+ConstCharacter:  CharacterWithLength
+				{
+					$$ = $1;
+				}
+			| CharacterWithoutLength
+				{
+					/* Length was not specified so allow to be unrestricted.
+					 * This handles problems with fixed-length (bpchar) strings
+					 * which in column definitions must default to a length
+					 * of one, but should not be constrained if the length
+					 * was not specified.
+					 */
+					$$ = $1;
+					$$.typmods = null;
+				}
+		;
+
+CharacterWithLength:  character '(' Iconst ')'
+				{
+					$$ = _.SystemTypeName($1);
+					$$.typmods = [_.makeIntConst($3, @3)];
+					$$.location = @1;
+				}
+		;
+
+CharacterWithoutLength:	 character
+				{
+					$$ = _.SystemTypeName($1);
+					/* char defaults to char(1), varchar to no limit */
+					if (strcmp($1, "bpchar") == 0)
+						$$.typmods = [_.makeIntConst(1, -1)];
+					$$.location = @1;
+				}
+		;
+
+character:	CHARACTER opt_varying
+										{ $$ = $2 ? "varchar": "bpchar"; }
+			| CHAR_P opt_varying
+										{ $$ = $2 ? "varchar": "bpchar"; }
+			| VARCHAR
+										{ $$ = "varchar"; }
+			| NATIONAL CHARACTER opt_varying
+										{ $$ = $3 ? "varchar": "bpchar"; }
+			| NATIONAL CHAR_P opt_varying
+										{ $$ = $3 ? "varchar": "bpchar"; }
+			| NCHAR opt_varying
+										{ $$ = $2 ? "varchar": "bpchar"; }
+		;
+
+opt_varying:
+			VARYING									{ $$ = true; }
+			| /*EMPTY*/								{ $$ = false; }
+		;
+
+/*
+ * SQL date/time types
+ */
+ConstDatetime:
+			TIMESTAMP '(' Iconst ')' opt_timezone
+				{
+					if ($5)
+						$$ = _.SystemTypeName("timestamptz");
+					else
+						$$ = _.SystemTypeName("timestamp");
+					$$.typmods = [_.makeIntConst($3, @3)];
+					$$.location = @1;
+				}
+			| TIMESTAMP opt_timezone
+				{
+					if ($2)
+						$$ = _.SystemTypeName("timestamptz");
+					else
+						$$ = _.SystemTypeName("timestamp");
+					$$.location = @1;
+				}
+			| TIME '(' Iconst ')' opt_timezone
+				{
+					if ($5)
+						$$ = _.SystemTypeName("timetz");
+					else
+						$$ = _.SystemTypeName("time");
+					$$.typmods = [_.makeIntConst($3, @3)];
+					$$.location = @1;
+				}
+			| TIME opt_timezone
+				{
+					if ($2)
+						$$ = _.SystemTypeName("timetz");
+					else
+						$$ = _.SystemTypeName("time");
+					$$.location = @1;
+				}
+		;
+
+ConstInterval:
+			INTERVAL
+				{
+					$$ = _.SystemTypeName("interval");
+					$$.location = @1;
+				}
+		;
+
+opt_timezone:
+			WITH_LA TIME ZONE						{ $$ = true; }
+			| WITHOUT TIME ZONE						{ $$ = false; }
+			| /*EMPTY*/								{ $$ = false; }
+		;
+
+opt_interval:
+			YEAR_P
+				{ $$ = [_.makeIntConst(_.INTERVAL_MASK(_.YEAR), @1)]; }
+			| MONTH_P
+				{ $$ = [_.makeIntConst(_.INTERVAL_MASK(_.MONTH), @1)]; }
+			| DAY_P
+				{ $$ = [_.makeIntConst(_.INTERVAL_MASK(_.DAY), @1)]; }
+			| HOUR_P
+				{ $$ = [_.makeIntConst(_.INTERVAL_MASK(_.HOUR), @1)]; }
+			| MINUTE_P
+				{ $$ = [_.makeIntConst(_.INTERVAL_MASK(_.MINUTE), @1)]; }
+			| interval_second
+				{ $$ = $1; }
+			| YEAR_P TO MONTH_P
+				{
+					$$ = [_.makeIntConst(_.INTERVAL_MASK(_.YEAR) |
+												 _.INTERVAL_MASK(_.MONTH), @1)];
+				}
+			| DAY_P TO HOUR_P
+				{
+					$$ = [_.makeIntConst(_.INTERVAL_MASK(_.DAY) |
+												 _.INTERVAL_MASK(_.HOUR), @1)];
+				}
+			| DAY_P TO MINUTE_P
+				{
+					$$ = [_.makeIntConst(_.INTERVAL_MASK(_.DAY) |
+												 _.INTERVAL_MASK(_.HOUR) |
+												 _.INTERVAL_MASK(_.MINUTE), @1)];
+				}
+			| DAY_P TO interval_second
+				{
+					$$ = $3;
+					linitial($$) = _.makeIntConst(_.INTERVAL_MASK(_.DAY) |
+												_.INTERVAL_MASK(_.HOUR) |
+												_.INTERVAL_MASK(_.MINUTE) |
+												_.INTERVAL_MASK(_.SECOND), @1);
+				}
+			| HOUR_P TO MINUTE_P
+				{
+					$$ = [_.makeIntConst(_.INTERVAL_MASK(_.HOUR) |
+												 _.INTERVAL_MASK(_.MINUTE), @1)];
+				}
+			| HOUR_P TO interval_second
+				{
+					$$ = $3;
+					linitial($$) = _.makeIntConst(_.INTERVAL_MASK(_.HOUR) |
+												_.INTERVAL_MASK(_.MINUTE) |
+												_.INTERVAL_MASK(_.SECOND), @1);
+				}
+			| MINUTE_P TO interval_second
+				{
+					$$ = $3;
+					linitial($$) = _.makeIntConst(_.INTERVAL_MASK(_.MINUTE) |
+												_.INTERVAL_MASK(_.SECOND), @1);
+				}
+			| /*EMPTY*/
+				{ $$ = null; }
+		;
+
+interval_second:
+			SECOND_P
+				{
+					$$ = [_.makeIntConst(_.INTERVAL_MASK(_.SECOND), @1)];
+				}
+			| SECOND_P '(' Iconst ')'
+				{
+					$$ = [_.makeIntConst(_.INTERVAL_MASK(_.SECOND), @1),
+									_.makeIntConst($3, @3)];
+				}
 		;
 
 /*
@@ -792,9 +1203,87 @@ c_expr:		columnref								{ $$ = $1; }
  */
 a_expr:		c_expr									{ $$ = $1; }
 			| a_expr TYPECAST Typename
-					{ $$ = yy.nodes.makeTypeCast($1, $3, @2); }
+					{ $$ = _.makeTypeCast($1, $3, @2); }
+			| a_expr COLLATE any_name
+				{
+					$$ = {
+						type: _.NodeTag.T_CollateClause,
+						arg: $1,
+						collname: $3,
+						location: @2
+					};
+				}
+			| a_expr AT TIME ZONE a_expr			%prec AT
+				{
+					$$ = _.makeFuncCall(SystemFuncName("timezone"),
+											   [$5, $1],
+											   @2);
+				}
+			| '+' a_expr					%prec UMINUS
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "+", NULL, $2, @1); }
+			| '-' a_expr					%prec UMINUS
+				{ $$ = _.doNegate($2, @1); }
 			| a_expr '+' a_expr
-				{ $$ = yy.nodes.makeSimpleA_Expr('AEXPR_OP', "+", $1, $3, @2); }
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "+", $1, $3, @2); }
+			| a_expr '-' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "-", $1, $3, @2); }
+			| a_expr '*' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "*", $1, $3, @2); }
+			| a_expr '/' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "/", $1, $3, @2); }
+			| a_expr '%' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "%", $1, $3, @2); }
+			| a_expr '^' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "^", $1, $3, @2); }
+			| a_expr '<' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "<", $1, $3, @2); }
+			| a_expr '>' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, ">", $1, $3, @2); }
+			| a_expr '=' a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "=", $1, $3, @2); }
+			| a_expr LESS_EQUALS a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "<=", $1, $3, @2); }
+			| a_expr GREATER_EQUALS a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, ">=", $1, $3, @2); }
+			| a_expr NOT_EQUALS a_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "<>", $1, $3, @2); }
+
+			| a_expr qual_Op a_expr				%prec Op
+				{ $$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP, $2, $1, $3, @2); }
+			| qual_Op a_expr					%prec Op
+				{ $$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP, $1, null, $2, @1); }
+			| a_expr qual_Op					%prec POSTFIXOP
+				{ $$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP, $2, $1, null, @2); }
+
+			| a_expr AND a_expr
+				{ $$ = _.makeAndExpr($1, $3, @2); }
+			| a_expr OR a_expr
+				{ $$ = _.makeOrExpr($1, $3, @2); }
+			| NOT a_expr
+				{ $$ = _.makeNotExpr($2, @1); }
+			| NOT_LA a_expr						%prec NOT
+				{ $$ = _.makeNotExpr($2, @1); }
+		;
+
+
+any_name_list:
+			any_name								{ $$ = [$1]; }
+			| any_name_list ',' any_name			{ $1.push($3); $$ = $1; }
+		;
+
+any_name:	ColId						{ $$ = [_.makeString($1)]; }
+			| ColId attrs				{ $2.unshift(_.makeString($1)); $$ = $2; }
+		;
+
+attrs:		'.' attr_name
+					{ $$ = [makeString($2)]; }
+			| attrs '.' attr_name
+					{ $1.push(_.makeString($3)); $$ = $1; }
+		;
+
+type_name_list:
+			Typename								{ $$ = [$1]; }
+			| type_name_list ',' Typename			{ $1.push($3); $$ = $1; }
 		;
 
 /*
@@ -807,12 +1296,12 @@ a_expr:		c_expr									{ $$ = $1; }
 qualified_name:
 			ColId
 				{
-					$$ = yy.nodes.makeRangeVar(null, $1, @1);
+					$$ = _.makeRangeVar(null, $1, @1);
 				}
 			| ColId indirection
 				{
 					// check_qualified_name($2, yyscanner);
-					$$ = yy.nodes.makeRangeVar(null, null, @1);
+					$$ = _.makeRangeVar(null, null, @1);
 					switch ($2.length)
 					{
 						case 1:
@@ -826,10 +1315,11 @@ qualified_name:
 							$$.relname = $2[1].str
 							break;
 						default:
+							$2.unshift(_.makeString($1));
 							/* ereport(ERROR,
 									(errcode(ERRCODE_SYNTAX_ERROR),
 									 errmsg("improper qualified name (too many dotted names): %s",
-											NameListToString(lcons(makeString($1), $2))),
+											NameListToString($2))),
 									 parser_errposition(@1))); */
 							throw new Error(`improper qualified name (too many dotted names): ${$1}, ${$2}`)
 							break;
@@ -838,9 +1328,9 @@ qualified_name:
 		;
 
 name_list:	name
-					{ $$ = [yy.nodes.makeString($1)]; }
+					{ $$ = [_.makeString($1)]; }
 			| name_list ',' name
-					{ $1.push(makeString($3)); $$ = $1; }
+					{ $1.push(_.makeString($3)); $$ = $1; }
 		;
 
 
@@ -860,13 +1350,13 @@ file_name:	Sconst									{ $$ = $1; };
 
 
 opt_all_clause:
-			ALL										{ $$ = NIL;}
-			| /*EMPTY*/								{ $$ = NIL; }
+			ALL										{ $$ = null;}
+			| /*EMPTY*/								{ $$ = null; }
 		;
 
 opt_sort_clause:
 			sort_clause								{ $$ = $1;}
-			| /*EMPTY*/								{ $$ = NIL; }
+			| /*EMPTY*/								{ $$ = null; }
 		;
 
 sort_clause:
@@ -875,5 +1365,5 @@ sort_clause:
 
 sortby_list:
 			sortby									{ $$ = [$1]; }
-			| sortby_list ',' sortby				{ $$ = $1/push($3); }
+			| sortby_list ',' sortby				{ $1.push($3); $$ = $1; }
 		;

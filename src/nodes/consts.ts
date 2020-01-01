@@ -1,8 +1,8 @@
-import { Node } from "./node";
-import { TypeName, TypeCast, A_Const } from "./parsenodes";
+import { Node, IsA } from "./node";
+import { TypeName, TypeCast, A_Const, A_Expr_Kind } from "./parsenodes";
 import { NodeTag } from "./tags";
 import { Value } from "./value";
-import { SystemTypeName } from "./makefuncs";
+import { SystemTypeName, makeSimpleA_Expr } from "./makefuncs";
 
 export function makeTypeCast<T extends NodeTag>(arg: Node<T>, typename: TypeName, location: number): TypeCast<T> {
 	return {
@@ -115,4 +115,55 @@ export function makeBoolAConst(state: boolean, location: number): TypeCast<NodeT
     }
 
 	return makeTypeCast(n, SystemTypeName("bool"), -1);
+}
+
+/* doNegate()
+ * Handle negation of a numeric constant.
+ *
+ * Formerly, we did this here because the optimizer couldn't cope with
+ * indexquals that looked like "var = -4" --- it wants "var = const"
+ * and a unary minus operator applied to a constant didn't qualify.
+ * As of Postgres 7.0, that problem doesn't exist anymore because there
+ * is a constant-subexpression simplifier in the optimizer.  However,
+ * there's still a good reason for doing this here, which is that we can
+ * postpone committing to a particular internal representation for simple
+ * negative constants.	It's better to leave "-123.456" in string form
+ * until we know what the desired type is.
+ */
+export function doNegate<T extends NodeTag>(n: Node<T>, location: number)
+{
+	if (IsA(n, 'A_Const'))
+	{
+		const con = n as unknown as A_Const;
+
+		/* report the constant's location as that of the '-' sign */
+		con.location = location;
+
+		if (con.val && con.val.type == 'T_Integer')
+		{
+			con.val.val.ival = -con.val.val.ival;
+			return n;
+		}
+		if (con.val && con.val.type == 'T_Float')
+		{
+			doNegateFloat(con.val);
+			return n;
+		}
+	}
+
+	return makeSimpleA_Expr(A_Expr_Kind.AEXPR_OP, '-', null, n, location);
+}
+
+export function doNegateFloat(v: Value<NodeTag.T_Float>)
+{
+	let oldval: string = v.val.str;
+
+	// Assert(IsA(v, Float));
+	if (oldval.startsWith('+'))
+        oldval = oldval.slice(1);
+
+	if (oldval.startsWith('-'))
+		v.val.str = oldval.slice(1);	/* just strip the '-' */
+	else
+		v.val.str = `-${oldval}`;
 }

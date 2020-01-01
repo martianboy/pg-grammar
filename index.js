@@ -4,7 +4,6 @@ const fs = require('fs');
 pg.parser.parse = require('./parse');
 
 pg.parser.yy = {
-  nodes: require('./src'),
   config: require("./config"),
   lval: {
     str: null,

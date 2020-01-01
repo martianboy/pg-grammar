@@ -1,5 +1,6 @@
-import { Node } from "./node";
+import { Node, JoinType, OnConflictAction } from "./node";
 import { NodeTag } from "./tags";
+import { Value } from ".";
 
 
 /* ----------------------------------------------------------------
@@ -21,6 +22,8 @@ export type Expr =
 	| RangeVar
 	| TableFunc
 	| Param
+	| BoolExpr
+	| InferenceElem
 	;
 
 /*
@@ -195,4 +198,225 @@ export interface Param extends Node<NodeTag.T_Param>
 	paramtypmod: number;	/* typmod value, if known */
 	paramcollid: Oid;		/* OID of collation, or InvalidOid if none */
 	location: number;		/* token location, or -1 if unknown */
+}
+
+
+/*
+ * BoolExpr - expression node for the basic Boolean operators AND, OR, NOT
+ *
+ * Notice the arguments are given as a List.  For NOT, of course the list
+ * must always have exactly one element.  For AND and OR, there can be two
+ * or more arguments.
+ */
+export enum BoolExprType
+{
+	AND_EXPR, OR_EXPR, NOT_EXPR
+};
+
+export interface BoolExpr extends Node<NodeTag.T_BoolExpr>
+{
+	boolop: BoolExprType;
+	args: any[];			/* arguments to this expression */
+	location: number;		/* token location, or -1 if unknown */
+};
+
+
+/*
+ * InferenceElem - an element of a unique index inference specification
+ *
+ * This mostly matches the structure of IndexElems, but having a dedicated
+ * primnode allows for a clean separation between the use of index parameters
+ * by utility commands, and this node.
+ */
+export interface InferenceElem extends Node<NodeTag.T_InferenceElem>
+{
+	expr: Expr;			/* expression to infer from, or NULL */
+	infercollid: number;	/* OID of collation, or InvalidOid */
+	inferopclass: number;	/* OID of att opclass, or InvalidOid */
+};
+
+/*--------------------
+ * TargetEntry -
+ *	   a target entry (used in query target lists)
+ *
+ * Strictly speaking, a TargetEntry isn't an expression node (since it can't
+ * be evaluated by ExecEvalExpr).  But we treat it as one anyway, since in
+ * very many places it's convenient to process a whole query targetlist as a
+ * single expression tree.
+ *
+ * In a SELECT's targetlist, resno should always be equal to the item's
+ * ordinal position (counting from 1).  However, in an INSERT or UPDATE
+ * targetlist, resno represents the attribute number of the destination
+ * column for the item; so there may be missing or out-of-order resnos.
+ * It is even legal to have duplicated resnos; consider
+ *		UPDATE table SET arraycol[1] = ..., arraycol[2] = ..., ...
+ * The two meanings come together in the executor, because the planner
+ * transforms INSERT/UPDATE tlists into a normalized form with exactly
+ * one entry for each column of the destination table.  Before that's
+ * happened, however, it is risky to assume that resno == position.
+ * Generally get_tle_by_resno() should be used rather than list_nth()
+ * to fetch tlist entries by resno, and only in SELECT should you assume
+ * that resno is a unique identifier.
+ *
+ * resname is required to represent the correct column name in non-resjunk
+ * entries of top-level SELECT targetlists, since it will be used as the
+ * column title sent to the frontend.  In most other contexts it is only
+ * a debugging aid, and may be wrong or even NULL.  (In particular, it may
+ * be wrong in a tlist from a stored rule, if the referenced column has been
+ * renamed by ALTER TABLE since the rule was made.  Also, the planner tends
+ * to store NULL rather than look up a valid name for tlist entries in
+ * non-toplevel plan nodes.)  In resjunk entries, resname should be either
+ * a specific system-generated name (such as "ctid") or NULL; anything else
+ * risks confusing ExecGetJunkAttribute!
+ *
+ * ressortgroupref is used in the representation of ORDER BY, GROUP BY, and
+ * DISTINCT items.  Targetlist entries with ressortgroupref=0 are not
+ * sort/group items.  If ressortgroupref>0, then this item is an ORDER BY,
+ * GROUP BY, and/or DISTINCT target value.  No two entries in a targetlist
+ * may have the same nonzero ressortgroupref --- but there is no particular
+ * meaning to the nonzero values, except as tags.  (For example, one must
+ * not assume that lower ressortgroupref means a more significant sort key.)
+ * The order of the associated SortGroupClause lists determine the semantics.
+ *
+ * resorigtbl/resorigcol identify the source of the column, if it is a
+ * simple reference to a column of a base table (or view).  If it is not
+ * a simple reference, these fields are zeroes.
+ *
+ * If resjunk is true then the column is a working column (such as a sort key)
+ * that should be removed from the final output of the query.  Resjunk columns
+ * must have resnos that cannot duplicate any regular column's resno.  Also
+ * note that there are places that assume resjunk columns come after non-junk
+ * columns.
+ *--------------------
+ */
+export interface TargetEntry extends Node<NodeTag.T_TargetEntry>
+{
+	expr: Expr;			/* expression to evaluate */
+	resno: AttrNumber;			/* attribute number (see notes above) */
+	resname: string;		/* name of the column (could be NULL) */
+	ressortgroupref: Index;	/* nonzero if referenced by a sort/group
+									 * clause */
+	resorigtbl: number;		/* OID of column's source table */
+	resorigcol: AttrNumber;		/* column's number in source table */
+	resjunk: boolean;		/* set to true to eliminate the attribute from
+								 * final target list */
+}
+
+
+/* ----------------------------------------------------------------
+ *					node types for join trees
+ *
+ * The leaves of a join tree structure are RangeTblRef nodes.  Above
+ * these, JoinExpr nodes can appear to denote a specific kind of join
+ * or qualified join.  Also, FromExpr nodes can appear to denote an
+ * ordinary cross-product join ("FROM foo, bar, baz WHERE ...").
+ * FromExpr is like a JoinExpr of jointype JOIN_INNER, except that it
+ * may have any number of child nodes, not just two.
+ *
+ * NOTE: the top level of a Query's jointree is always a FromExpr.
+ * Even if the jointree contains no rels, there will be a FromExpr.
+ *
+ * NOTE: the qualification expressions present in JoinExpr nodes are
+ * *in addition to* the query's main WHERE clause, which appears as the
+ * qual of the top-level FromExpr.  The reason for associating quals with
+ * specific nodes in the jointree is that the position of a qual is critical
+ * when outer joins are present.  (If we enforce a qual too soon or too late,
+ * that may cause the outer join to produce the wrong set of NULL-extended
+ * rows.)  If all joins are inner joins then all the qual positions are
+ * semantically interchangeable.
+ *
+ * NOTE: in the raw output of gram.y, a join tree contains RangeVar,
+ * RangeSubselect, and RangeFunction nodes, which are all replaced by
+ * RangeTblRef nodes during the parse analysis phase.  Also, the top-level
+ * FromExpr is added during parse analysis; the grammar regards FROM and
+ * WHERE as separate.
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * RangeTblRef - reference to an entry in the query's rangetable
+ *
+ * We could use direct pointers to the RT entries and skip having these
+ * nodes, but multiple pointers to the same node in a querytree cause
+ * lots of headaches, so it seems better to store an index into the RT.
+ */
+export interface RangeTblRef extends Node<NodeTag.T_RangeTblRef>
+{
+	rtindex: number;
+}
+
+/*----------
+ * JoinExpr - for SQL JOIN expressions
+ *
+ * isNatural, usingClause, and quals are interdependent.  The user can write
+ * only one of NATURAL, USING(), or ON() (this is enforced by the grammar).
+ * If he writes NATURAL then parse analysis generates the equivalent USING()
+ * list, and from that fills in "quals" with the right equality comparisons.
+ * If he writes USING() then "quals" is filled with equality comparisons.
+ * If he writes ON() then only "quals" is set.  Note that NATURAL/USING
+ * are not equivalent to ON() since they also affect the output column list.
+ *
+ * alias is an Alias node representing the AS alias-clause attached to the
+ * join expression, or NULL if no clause.  NB: presence or absence of the
+ * alias has a critical impact on semantics, because a join with an alias
+ * restricts visibility of the tables/columns inside it.
+ *
+ * During parse analysis, an RTE is created for the Join, and its index
+ * is filled into rtindex.  This RTE is present mainly so that Vars can
+ * be created that refer to the outputs of the join.  The planner sometimes
+ * generates JoinExprs internally; these can have rtindex = 0 if there are
+ * no join alias variables referencing such joins.
+ *----------
+ */
+export interface JoinExpr extends Node<NodeTag.T_JoinExpr>
+{
+	jointype: JoinType;		/* type of join */
+	isNatural: boolean;		/* Natural join? Will need to shape table */
+	larg: Node<any> | null;			/* left subtree */
+	rarg: Node<any> | null;			/* right subtree */
+	usingClause?: Value<NodeTag.T_String>[];	/* USING clause, if any (list of String) */
+	quals?: Node<any>[];			/* qualifiers on join, if any */
+	alias?: Alias;			/* user-written alias clause, if any */
+	rtindex: number;		/* RT index assigned for join, or 0 */
+}
+
+/*----------
+ * FromExpr - represents a FROM ... WHERE ... construct
+ *
+ * This is both more flexible than a JoinExpr (it can have any number of
+ * children, including zero) and less so --- we don't need to deal with
+ * aliases and so on.  The output column set is implicitly just the union
+ * of the outputs of the children.
+ *----------
+ */
+export interface FromExpr extends Node<NodeTag.T_FromExpr>
+{
+	fromlist: unknown[];		/* List of join subtrees */
+	quals: Node<any>[];			/* qualifiers on join, if any */
+}
+
+/*----------
+ * OnConflictExpr - represents an ON CONFLICT DO ... expression
+ *
+ * The optimizer requires a list of inference elements, and optionally a WHERE
+ * clause to infer a unique index.  The unique index (or, occasionally,
+ * indexes) inferred are used to arbitrate whether or not the alternative ON
+ * CONFLICT path is taken.
+ *----------
+ */
+export interface OnConflictExpr extends Node<NodeTag.T_OnConflictExpr>
+{
+	action: OnConflictAction;	/* DO NOTHING or UPDATE? */
+
+	/* Arbiter */
+	arbiterElems: InferenceElem[];	/* unique index arbiter list (of
+								 * InferenceElem's) */
+	arbiterWhere: unknown;	/* unique index arbiter WHERE clause */
+	constraint: number;		/* pg_constraint OID for arbiter */
+
+	/* ON CONFLICT UPDATE */
+	onConflictSet: unknown[];	/* List of ON CONFLICT SET TargetEntrys */
+	onConflictWhere: unknown[];	/* qualifiers to restrict UPDATE to */
+	exclRelIndex: number;	/* RT index of 'excluded' relation */
+	exclRelTlist: unknown[];	/* tlist of the EXCLUDED pseudo relation */
 }

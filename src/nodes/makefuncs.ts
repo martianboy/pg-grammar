@@ -1,8 +1,11 @@
-import { Node } from './node';
-import { RangeVar, Var, Index, AttrNumber, Oid } from "./primnodes";
+import { Node, IsA } from './node';
+import { RangeVar, Var, Index, AttrNumber, Oid, BoolExpr, BoolExprType, FromExpr, Const, Alias, Expr } from "./primnodes";
 import { NodeTag } from "./tags";
 import { TypeName, A_Expr, A_Expr_Kind } from "./parsenodes";
-import { makeString } from "./value";
+import { makeString, Value } from "./value";
+import { BoolGetDatum } from './datum';
+import { BOOLOID } from '../common/pg_type_d';
+import { RELPERSISTENCE_PERMANENT } from '../common/pg_class_d';
 
 /*
  * makeA_Expr -
@@ -26,7 +29,7 @@ export function makeA_Expr(kind: A_Expr_Kind, name: Node<NodeTag.T_String>[],
  *		As above, given a simple (unqualified) operator name
  */
 export function makeSimpleA_Expr(kind: A_Expr_Kind, name: string,
-				 lexpr: Node<any>, rexpr: Node<any>, location: number): A_Expr
+				 lexpr: Node<any> | null, rexpr: Node<any> | null, location: number): A_Expr
 {
     return {
         type: NodeTag.T_A_Expr,
@@ -76,19 +79,140 @@ export function makeVar(varno: Index,
  */
 export function makeRangeVar(schemaname: string, relname: string, location: number): RangeVar
 {
-	const r: RangeVar = {
+    return {
         type: NodeTag.T_RangeVar,
-        catalogname: null,
-        schemaname,
-        relname,
-        inh: true,
-        relpersistence: '',
-        alias: null,
-        location
+	    catalogname: null,
+	    schemaname,
+	    relname,
+	    inh: true,
+	    relpersistence: RELPERSISTENCE_PERMANENT,
+	    alias: null,
+	    location: location,
     }
-
-	return r;
 }
+
+
+/*
+ * makeFromExpr -
+ *	  creates a FromExpr node
+ */
+export function makeFromExpr(fromlist: unknown[], quals: Node<any>[]): FromExpr
+{
+	return {
+        type: NodeTag.T_FromExpr,
+        fromlist,
+        quals
+    }
+}
+
+/*
+ * makeConst -
+ *	  creates a Const node
+ */
+export function makeConst(consttype: Oid,
+		  consttypmod: number,
+		  constcollid: Oid,
+		  constlen: number,
+		  constvalue: any,
+		  constisnull: boolean,
+		  constbyval: boolean): Const
+{
+	/*
+	 * If it's a varlena value, force it to be in non-expanded (non-toasted)
+	 * format; this avoids any possible dependency on external values and
+	 * improves consistency of representation, which is important for equal().
+	 */
+	if (!constisnull && constlen == -1)
+		constvalue = null;
+
+    return {
+        type: NodeTag.T_Const,
+        consttype,
+        consttypmod,
+        constcollid,
+        constlen,
+        constvalue,
+        constisnull,
+        constbyval,
+        location: -1
+    }
+}
+
+/*
+ * makeNullConst -
+ *	  creates a Const node representing a NULL of the specified type/typmod
+ *
+ * This is a convenience routine that just saves a lookup of the type's
+ * storage properties.
+ */
+export function makeNullConst(consttype: Oid, consttypmod: number, constcollid: Oid): Const
+{
+	return makeConst(consttype,
+					 consttypmod,
+					 constcollid,
+					 0,
+					 0,
+					 true,
+					 false);
+}
+
+/*
+ * makeBoolConst -
+ *	  creates a Const node representing a boolean value (can be NULL too)
+ */
+export function makeBoolConst(value: boolean, isnull: boolean)
+{
+	/* note that pg_type.h hardwires size of bool as 1 ... duplicate it */
+	return makeConst(BOOLOID, -1, 0, 1,
+							  BoolGetDatum(value), isnull, true);
+}
+
+/*
+ * makeBoolExpr -
+ *	  creates a BoolExpr node
+ */
+export function makeBoolExpr(boolop: BoolExprType, args: unknown[], location: number): BoolExpr
+{
+	return {
+        type: NodeTag.T_BoolExpr,
+        boolop,
+        args,
+        location
+    };
+}
+
+/*
+ * makeAlias -
+ *	  creates an Alias node
+ *
+ * NOTE: the given name is copied, but the colnames list (if any) isn't.
+ */
+export function makeAlias(aliasname: string, colnames: Value<NodeTag.T_String>[]): Alias
+{
+	return {
+        type: NodeTag.T_Alias,
+        aliasname,
+        colnames
+    };
+}
+
+// /*
+//  * makeRelabelType -
+//  *	  creates a RelabelType node
+//  */
+// export function makeRelabelType(arg: Expr, rtype: Oid, rtypmod: number, rcollid: Oid,
+// 				rformat: CoercionForm): RelabelType
+// {
+//     return {
+//         type: NodeTag.T_RelabelType,
+// 	    arg,
+// 	    resulttype: rtype,
+// 	    resulttypmod: rtypmod,
+// 	    resultcollid: rcollid,
+// 	    relabelformat: rformat,
+//         location: -1
+//     };
+// }
 
 /*
  * makeTypeName -
@@ -127,4 +251,54 @@ export function makeTypeNameFromNameList(names: Node<NodeTag.T_String>[]): TypeN
 export function SystemTypeName(name: string): TypeName
 {
 	return makeTypeNameFromNameList([makeString("pg_catalog"), makeString(name)]);
+}
+
+
+export function makeAndExpr(lexpr: Node<any> | null, rexpr: Node<any>, location: number)
+{
+	let lexp = lexpr;
+
+	/* Look through AEXPR_PAREN nodes so they don't affect flattening */
+	while (IsA(lexp, 'A_Expr') &&
+		   ((lexp as A_Expr).kind == A_Expr_Kind.AEXPR_PAREN))
+		lexp = (lexp as A_Expr).lexpr;
+	/* Flatten "a AND b AND c ..." to a single BoolExpr on sight */
+	if (IsA(lexp, 'BoolExpr'))
+	{
+		let blexpr: BoolExpr = lexp as BoolExpr;
+
+		if (blexpr.boolop == BoolExprType.AND_EXPR)
+		{
+			blexpr.args.push(rexpr);
+			return blexpr;
+		}
+	}
+	return makeBoolExpr(BoolExprType.AND_EXPR, [lexpr, rexpr], location);
+}
+
+export function makeOrExpr(lexpr: Node<any> | null, rexpr: Node<any> | null, location: number)
+{
+	let lexp = lexpr;
+
+	/* Look through AEXPR_PAREN nodes so they don't affect flattening */
+	while (IsA(lexp, 'A_Expr') &&
+		   ((lexp as A_Expr).kind == A_Expr_Kind.AEXPR_PAREN))
+		lexp = (lexp as A_Expr).lexpr;
+	/* Flatten "a AND b AND c ..." to a single BoolExpr on sight */
+	if (IsA(lexp, 'BoolExpr'))
+	{
+		let blexpr: BoolExpr = lexp as BoolExpr;
+
+		if (blexpr.boolop == BoolExprType.OR_EXPR)
+		{
+			blexpr.args.push(rexpr);
+			return blexpr;
+		}
+	}
+	return makeBoolExpr(BoolExprType.OR_EXPR, [lexpr, rexpr], location);
+}
+
+export function makeNotExpr(expr: Expr, location: number)
+{
+	return makeBoolExpr(BoolExprType.NOT_EXPR, [expr], location);
 }

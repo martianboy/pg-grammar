@@ -38,8 +38,8 @@ export enum A_Expr_Kind
 export interface A_Expr extends Node<NodeTag.T_A_Expr> {
 	kind: A_Expr_Kind;		/* see above */
 	name: Node<NodeTag.T_String>[];    			/* possibly-qualified name of operator */
-	lexpr: Node<any>;		    	/* left argument, or NULL if none */
-	rexpr: Node<any>;			    /* right argument, or NULL if none */
+	lexpr: Node<any> | null;		    	/* left argument, or NULL if none */
+	rexpr: Node<any> | null;			    /* right argument, or NULL if none */
 	location: number;		  /* token location, or -1 if unknown */
 }
 
@@ -82,6 +82,16 @@ export interface TypeCast<T extends NodeTag> extends Node<NodeTag.T_TypeCast> {
 	typeName: TypeName;		/* the target type */
 	location: number;		/* token location, or -1 if unknown */
 }
+
+/*
+ * CollateClause - a COLLATE expression
+ */
+export interface CollateClause extends Node<NodeTag.T_CollateClause>
+{
+	arg: Node<any>;			/* input expression */
+	collname: Value<NodeTag.T_String>;		/* possibly-qualified collation name */
+	location: number;		/* token location, or -1 if unknown */
+};
 
 /*
  * A_Star - '*' representing all columns of a table or compound field
