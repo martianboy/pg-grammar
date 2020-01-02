@@ -552,7 +552,6 @@ stmtmulti:	stmtmulti ';' stmt
 				{
 					if ($1 != null)
 					{
-						console.log($1);
 						/* update length of previous stmt */
 						updateRawStmtEnd($1[$1.length - 1], @2);
 					}
@@ -573,6 +572,390 @@ stmtmulti:	stmtmulti ';' stmt
 
 stmt:       a_expr;
 
+
+/*****************************************************************************
+ *
+ *	clauses common to all Optimizable Stmts:
+ *		from_clause		- allow list of both JOIN expressions and table names
+ *		where_clause	- qualifications for joins or restrictions
+ *
+ *****************************************************************************/
+
+from_clause:
+			FROM from_list							{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+from_list:
+			table_ref								{ $$ = [$1]; }
+			| from_list ',' table_ref				{ $$ = $1; $1.push($3); }
+		;
+
+/*
+ * table_ref is where an alias clause can be attached.
+ */
+table_ref:	relation_expr opt_alias_clause
+				{
+					$1.alias = $2;
+					$$ = $1;
+				}
+			| relation_expr opt_alias_clause tablesample_clause
+				{
+					$1.alias = $2;
+					$$ = {
+						...$3,
+						/* relation_expr goes inside the RangeTableSample node */
+						relation: $1
+					};
+				}
+			| func_table func_alias_clause
+				{
+					$$ = {
+						...$1,
+						alias: $2[0],
+						coldeflist: $2[1]
+					};
+				}
+			| LATERAL_P func_table func_alias_clause
+				{
+					$$ = {
+						...$2,
+						lateral: true,
+						alias: $3[0],
+						coldeflist: $3[1]
+					};
+				}
+			| xmltable opt_alias_clause
+				{
+					$$ = {
+						...$1,
+						alias: $2
+					};
+				}
+			| LATERAL_P xmltable opt_alias_clause
+				{
+					$$ = {
+						...$2,
+						lateral: true,
+						alias: $3,
+					};
+				}
+			| select_with_parens opt_alias_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_RangeSubselect,
+						lateral: false,
+						subquery: $1,
+						alias: $2
+					};
+					/*
+					 * The SQL spec does not permit a subselect
+					 * (<derived_table>) without an alias clause,
+					 * so we don't either.  This avoids the problem
+					 * of needing to invent a unique refname for it.
+					 * That could be surmounted if there's sufficient
+					 * popular demand, but for now let's just implement
+					 * the spec and see if anyone complains.
+					 * However, it does seem like a good idea to emit
+					 * an error message that's better than "syntax error".
+					 */
+					if ($2 == null)
+					{
+						if (_.IsA($1, 'SelectStmt') &&
+							$1.valuesLists)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("VALUES in FROM must have an alias"),
+									 errhint("For example, FROM (VALUES ...) [AS] foo."),
+									 parser_errposition(@1)));
+						else
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("subquery in FROM must have an alias"),
+									 errhint("For example, FROM (SELECT ...) [AS] foo."),
+									 parser_errposition(@1)));
+					}
+				}
+			| LATERAL_P select_with_parens opt_alias_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_RangeSubselect,
+						lateral: true,
+						subquery: $2,
+						alias: $3,
+					};
+					/* same comment as above */
+					if ($3 == null)
+					{
+						if (_.IsA($2, 'SelectStmt') &&
+							$2.valuesLists)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("VALUES in FROM must have an alias"),
+									 errhint("For example, FROM (VALUES ...) [AS] foo."),
+									 parser_errposition(@2)));
+						else
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("subquery in FROM must have an alias"),
+									 errhint("For example, FROM (SELECT ...) [AS] foo."),
+									 parser_errposition(@2)));
+					}
+				}
+			| joined_table
+				{
+					$$ = $1;
+				}
+			| '(' joined_table ')' alias_clause
+				{
+					$2.alias = $4;
+					$$ = $2;
+				}
+		;
+
+
+/*
+ * It may seem silly to separate joined_table from table_ref, but there is
+ * method in SQL's madness: if you don't do it this way you get reduce-
+ * reduce conflicts, because it's not clear to the parser generator whether
+ * to expect alias_clause after ')' or not.  For the same reason we must
+ * treat 'JOIN' and 'join_type JOIN' separately, rather than allowing
+ * join_type to expand to empty; if we try it, the parser generator can't
+ * figure out when to reduce an empty join_type right after table_ref.
+ *
+ * Note that a CROSS JOIN is the same as an unqualified
+ * INNER JOIN, and an INNER JOIN/ON has the same shape
+ * but a qualification expression to limit membership.
+ * A NATURAL JOIN implicitly matches column names between
+ * tables and the shape is determined by which columns are
+ * in common. We'll collect columns during the later transformations.
+ */
+
+joined_table:
+			'(' joined_table ')'
+				{
+					$$ = $2;
+				}
+			| table_ref CROSS JOIN table_ref
+				{
+					/* CROSS JOIN is same as unqualified inner join */
+					$$ = {
+						type: _.NodeTag.T_JoinExpr,
+						jointype: _.JoinType.JOIN_INNER,
+						isNatural: false,
+						larg: $1,
+						rarg: $4,
+						usingClause: null,
+						quals: null
+					};
+				}
+			| table_ref join_type JOIN table_ref join_qual
+				{
+					$$ = {
+						type: _.NodeTag.T_JoinExpr,
+						jointype: $2,
+						isNatural: false,
+						larg: $1,
+						rarg: $4,
+					};
+					if (Array.isArray($5))
+						$$.usingClause = $5; /* USING clause */
+					else
+						$$.quals = $5; /* ON clause */
+				}
+			| table_ref JOIN table_ref join_qual
+				{
+					/* letting join_type reduce to empty doesn't work */
+					$$ = {
+						type: _.NodeTag.T_JoinExpr,
+						jointype: _.JoinType.JOIN_INNER,
+						isNatural: false,
+						larg: $1,
+						rarg: $3,
+					};
+					if (Array.isArray($4))
+						$$.usingClause = $4; /* USING clause */
+					else
+						$$.quals = $4; /* ON clause */
+				}
+			| table_ref NATURAL join_type JOIN table_ref
+				{
+					$$ = {
+						type: _.NodeTag.T_JoinExpr,
+						jointype: $3,
+						isNatural: true,
+						larg: $1,
+						rarg: $5,
+						usingClause: null, /* figure out which columns later... */
+						quals: null, /* fill later */
+					};
+				}
+			| table_ref NATURAL JOIN table_ref
+				{
+					/* letting join_type reduce to empty doesn't work */
+					$$ = {
+						type: _.NodeTag.T_JoinExpr,
+						jointype: _.JoinType.JOIN_INNER,
+						isNatural: true,
+						larg: $1,
+						rarg: $4,
+						usingClause: null, /* figure out which columns later... */
+						quals: null, /* fill later */
+					};
+				}
+		;
+
+alias_clause:
+			AS ColId '(' name_list ')'
+				{
+					$$ = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $2,
+						colnames: $4
+					};
+				}
+			| AS ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $2
+					};
+				}
+			| ColId '(' name_list ')'
+				{
+					$$ = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $1,
+						colnames: $3
+					};
+				}
+			| ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $1
+					};
+				}
+		;
+
+opt_alias_clause: alias_clause						{ $$ = $1; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+
+join_type:	FULL join_outer							{ $$ = _.JoinType.JOIN_FULL; }
+			| LEFT join_outer						{ $$ = _.JoinType.JOIN_LEFT; }
+			| RIGHT join_outer						{ $$ = _.JoinType.JOIN_RIGHT; }
+			| INNER_P								{ $$ = _.JoinType.JOIN_INNER; }
+		;
+
+/* OUTER is just noise... */
+join_outer: OUTER_P									{ $$ = null; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+/* JOIN qualification clauses
+ * Possibilities are:
+ *	USING ( column list ) allows only unqualified column names,
+ *						  which must match between tables.
+ *	ON expr allows more general qualifications.
+ *
+ * We return USING as a List node, while an ON-expr will not be a List.
+ */
+
+join_qual:	USING '(' name_list ')'					{ $$ = $3; }
+			| ON a_expr								{ $$ = $2; }
+		;
+
+relation_expr:
+			qualified_name
+				{
+					/* inheritance query, implicitly */
+					$$ = $1;
+					$$.inh = true;
+					$$.alias = null;
+				}
+			| qualified_name '*'
+				{
+					/* inheritance query, explicitly */
+					$$ = $1;
+					$$.inh = true;
+					$$.alias = null;
+				}
+			| ONLY qualified_name
+				{
+					/* no inheritance */
+					$$ = $2;
+					$$.inh = false;
+					$$.alias = null;
+				}
+			| ONLY '(' qualified_name ')'
+				{
+					/* no inheritance, SQL99-style syntax */
+					$$ = $3;
+					$$.inh = false;
+					$$.alias = null;
+				}
+		;
+
+
+relation_expr_list:
+			relation_expr							{ $$ = [$1]; }
+			| relation_expr_list ',' relation_expr	{ $$ = $1; $1.push($3); }
+		;
+
+/*
+ * Given "UPDATE foo set set ...", we have to decide without looking any
+ * further ahead whether the first "set" is an alias or the UPDATE's SET
+ * keyword.  Since "set" is allowed as a column name both interpretations
+ * are feasible.  We resolve the shift/reduce conflict by giving the first
+ * relation_expr_opt_alias production a higher precedence than the SET token
+ * has, causing the parser to prefer to reduce, in effect assuming that the
+ * SET is not an alias.
+ */
+relation_expr_opt_alias: relation_expr					%prec UMINUS
+				{
+					$$ = $1;
+				}
+			| relation_expr ColId
+				{
+					$$ = $1;
+					$1.alias = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $2
+					}
+				}
+			| relation_expr AS ColId
+				{
+					$$ = $1;
+					$1.alias = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $3
+					}
+				}
+		;
+
+/*
+ * TABLESAMPLE decoration in a FROM item
+ */
+tablesample_clause:
+			TABLESAMPLE func_name '(' expr_list ')' opt_repeatable_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_RangeTableSample,
+						/* n->relation will be filled in later */
+						method: $2,
+						args: $4,
+						repeatable: $6,
+						location: @2
+					};
+				}
+		;
+
+opt_repeatable_clause:
+			REPEATABLE '(' a_expr ')'	{ $$ = $3; }
+			| /*EMPTY*/					{ $$ = null; }
+		;
 
 columnref:	ColId
 				{
@@ -680,8 +1063,8 @@ func_name:	type_function_name
 					{ $$ = [_.makeString($1)]; }
 			| ColId indirection
 					{
-						$$ = check_func_name(lcons(makeString($1), $2),
-											 yyscanner);
+						$2.unshift(_.makeString($1));
+						$$ = check_func_name($2, yyscanner);
 					}
 		;
 

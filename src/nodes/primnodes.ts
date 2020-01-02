@@ -109,7 +109,7 @@ export interface Const extends Node<NodeTag.T_Const>
  */
 export interface Alias extends Node<NodeTag.T_Alias> {
 	aliasname: string;		/* aliased rel name (never qualified) */
-	colnames: Node<any>[];		/* optional list of column aliases */
+	colnames: Value<NodeTag.T_String>[];		/* optional list of column aliases */
 }
 
 /*

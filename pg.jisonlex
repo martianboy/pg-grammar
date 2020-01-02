@@ -14,6 +14,8 @@
 
 %{
 
+const _ = require('./src');
+
 /*
  * GUC variables.  This is a DIRECT violation of the warning given at the
  * head of gram.y, ie flex/bison code must not depend on any GUC variables;
@@ -265,8 +267,6 @@ other			.
 				}
 
 {xqstart}		{
-					console.log('LEXER: xqstart');
-
 					yy.extra.warn_on_first_escape = true;
 					yy.extra.saw_non_ascii = false;
 					// SET_YYLLOC();
@@ -395,8 +395,6 @@ other			.
 				}
 
 {operator}		{
-					console.log('LEXER: operator');
-
 					/*
 					* Check for embedded slash-star or dash-dash; those
 					* are comment starts, so operator must stop there.
@@ -527,10 +525,10 @@ other			.
 
 {identifier}	{
 					/* Is it a keyword? */
-					let kwnum = yy.nodes.ScanKeywordLookup(yytext);
+					let kwnum = _.ScanKeywordLookup(yytext);
 					if (kwnum >= 0)
 					{
-						yy.lval.keyword = yy.nodes.GetScanKeyword(kwnum,
+						yy.lval.keyword = _.GetScanKeyword(kwnum,
 														 yy.extra.keywordlist);
 						return yy.lval.keyword;
 					}
