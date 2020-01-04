@@ -1,5 +1,9 @@
 %code imports {
 	const _ = require('./src');
+	const { ereport, errcode, errmsg, parser_errposition } = require('./src/common/errors');
+	const NULL = null;
+	const NIL = null;
+	const yyscanner = null;
 }
 
 %{
@@ -570,7 +574,454 @@ stmtmulti:	stmtmulti ';' stmt
 				}
 		;
 
-stmt:       a_expr;
+stmt:
+	SelectStmt
+	| /* EMPTY */ { $$ = null };
+
+PreparableStmt:
+			SelectStmt
+		;
+
+/* A complete SELECT statement looks like this.
+ *
+ * The rule returns either a single SelectStmt node or a tree of them,
+ * representing a set-operation tree.
+ *
+ * There is an ambiguity when a sub-SELECT is within an a_expr and there
+ * are excess parentheses: do the parentheses belong to the sub-SELECT or
+ * to the surrounding a_expr?  We don't really care, but bison wants to know.
+ * To resolve the ambiguity, we are careful to define the grammar so that
+ * the decision is staved off as long as possible: as long as we can keep
+ * absorbing parentheses into the sub-SELECT, we will do so, and only when
+ * it's no longer possible to do that will we decide that parens belong to
+ * the expression.	For example, in "SELECT (((SELECT 2)) + 3)" the extra
+ * parentheses are treated as part of the sub-select.  The necessity of doing
+ * it that way is shown by "SELECT (((SELECT 2)) UNION SELECT 2)".	Had we
+ * parsed "((SELECT 2))" as an a_expr, it'd be too late to go back to the
+ * SELECT viewpoint when we see the UNION.
+ *
+ * This approach is implemented by defining a nonterminal select_with_parens,
+ * which represents a SELECT with at least one outer layer of parentheses,
+ * and being careful to use select_with_parens, never '(' SelectStmt ')',
+ * in the expression grammar.  We will then have shift-reduce conflicts
+ * which we can resolve in favor of always treating '(' <select> ')' as
+ * a select_with_parens.  To resolve the conflicts, the productions that
+ * conflict with the select_with_parens productions are manually given
+ * precedences lower than the precedence of ')', thereby ensuring that we
+ * shift ')' (and then reduce to select_with_parens) rather than trying to
+ * reduce the inner <select> nonterminal to something else.  We use UMINUS
+ * precedence for this, which is a fairly arbitrary choice.
+ *
+ * To be able to define select_with_parens itself without ambiguity, we need
+ * a nonterminal select_no_parens that represents a SELECT structure with no
+ * outermost parentheses.  This is a little bit tedious, but it works.
+ *
+ * In non-expression contexts, we use SelectStmt which can represent a SELECT
+ * with or without outer parentheses.
+ */
+
+SelectStmt: select_no_parens			%prec UMINUS
+			| select_with_parens		%prec UMINUS
+		;
+
+select_with_parens:
+			'(' select_no_parens ')'				{ $$ = $2; }
+			| '(' select_with_parens ')'			{ $$ = $2; }
+		;
+
+/*
+ * This rule parses the equivalent of the standard's <query expression>.
+ * The duplicative productions are annoying, but hard to get rid of without
+ * creating shift/reduce conflicts.
+ *
+ *	The locking clause (FOR UPDATE etc) may be before or after LIMIT/OFFSET.
+ *	In <=7.2.X, LIMIT/OFFSET had to be after FOR UPDATE
+ *	We now support both orderings, but prefer LIMIT/OFFSET before the locking
+ * clause.
+ *	2002-08-28 bjm
+ */
+select_no_parens:
+			simple_select						{ $$ = $1; }
+			| select_clause sort_clause
+				{
+					_.insertSelectOptions($1, $2, null,
+										null, null, null,
+										yyscanner);
+					$$ = $1;
+				}
+			| select_clause opt_sort_clause for_locking_clause opt_select_limit
+				{
+					_.insertSelectOptions($1, $2, $3,
+										list_nth($4, 0), list_nth($4, 1),
+										null,
+										yyscanner);
+					$$ = $1;
+				}
+			| select_clause opt_sort_clause select_limit opt_for_locking_clause
+				{
+					_.insertSelectOptions($1, $2, $4,
+										list_nth($3, 0), list_nth($3, 1),
+										null,
+										yyscanner);
+					$$ = $1;
+				}
+			| with_clause select_clause
+				{
+					_.insertSelectOptions($2, null, null,
+										null, null,
+										$1,
+										yyscanner);
+					$$ = $2;
+				}
+			| with_clause select_clause sort_clause
+				{
+					_.insertSelectOptions($2, $3, null,
+										null, null,
+										$1,
+										yyscanner);
+					$$ = $2;
+				}
+			| with_clause select_clause opt_sort_clause for_locking_clause opt_select_limit
+				{
+					_.insertSelectOptions($2, $3, $4,
+										list_nth($5, 0), list_nth($5, 1),
+										$1,
+										yyscanner);
+					$$ = $2;
+				}
+			| with_clause select_clause opt_sort_clause select_limit opt_for_locking_clause
+				{
+					_.insertSelectOptions($2, $3, $5,
+										list_nth($4, 0), list_nth($4, 1),
+										$1,
+										yyscanner);
+					$$ = $2;
+				}
+		;
+
+select_clause:
+			simple_select						{ $$ = $1; }
+			| select_with_parens					{ $$ = $1; }
+		;
+
+/*
+ * This rule parses SELECT statements that can appear within set operations,
+ * including UNION, INTERSECT and EXCEPT.  '(' and ')' can be used to specify
+ * the ordering of the set operations.	Without '(' and ')' we want the
+ * operations to be ordered per the precedence specs at the head of this file.
+ *
+ * As with select_no_parens, simple_select cannot have outer parentheses,
+ * but can have parenthesized subclauses.
+ *
+ * Note that sort clauses cannot be included at this level --- SQL requires
+ *		SELECT foo UNION SELECT bar ORDER BY baz
+ * to be parsed as
+ *		(SELECT foo UNION SELECT bar) ORDER BY baz
+ * not
+ *		SELECT foo UNION (SELECT bar ORDER BY baz)
+ * Likewise for WITH, FOR UPDATE and LIMIT.  Therefore, those clauses are
+ * described as part of the select_no_parens production, not simple_select.
+ * This does not limit functionality, because you can reintroduce these
+ * clauses inside parentheses.
+ *
+ * NOTE: only the leftmost component SelectStmt should have INTO.
+ * However, this is not checked by the grammar; parse analysis must check it.
+ */
+simple_select:
+			SELECT opt_all_clause opt_target_list
+			into_clause from_clause where_clause
+			group_clause having_clause window_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_SelectStmt,
+						targetList: $3,
+						intoClause: $4,
+						fromClause: $5,
+						whereClause: $6,
+						groupClause: $7,
+						havingClause: $8,
+						windowClause: $9
+					};
+				}
+			| SELECT distinct_clause target_list
+			into_clause from_clause where_clause
+			group_clause having_clause window_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_SelectStmt,
+						distinctClause: $2,
+						targetList: $3,
+						intoClause: $4,
+						fromClause: $5,
+						whereClause: $6,
+						groupClause: $7,
+						havingClause: $8,
+						windowClause: $9
+					};
+				}
+			| values_clause							{ $$ = $1; }
+			| TABLE relation_expr
+				{
+					/* same as SELECT * FROM relation_expr */
+					var cr = {
+						type: _.NodeTag.T_ColumnRef,
+						fields: [{
+							type: _.NodeTag.T_A_Star,
+							location: -1
+						}]
+					};
+
+					var rt = {
+						type: _.NodeTag.T_ResTarget,
+						name: null,
+						indirection: null,
+						val: cr,
+						location: -1
+					};
+
+					$$ = {
+						type: _.NodeTag.T_SelectStmt,
+						targetList: [rt],
+						fromClause: [$2]
+					};
+				}
+			| select_clause UNION all_or_distinct select_clause
+				{
+					$$ = _.makeSetOp(_.SetOperation.SETOP_UNION, $3, $1, $4);
+				}
+			| select_clause INTERSECT all_or_distinct select_clause
+				{
+					$$ = _.makeSetOp(_.SetOperation.SETOP_INTERSECT, $3, $1, $4);
+				}
+			| select_clause EXCEPT all_or_distinct select_clause
+				{
+					$$ = _.makeSetOp(_.SetOperation.SETOP_EXCEPT, $3, $1, $4);
+				}
+		;
+
+/*
+ * SQL standard WITH clause looks like:
+ *
+ * WITH [ RECURSIVE ] <query name> [ (<column>,...) ]
+ *		AS (query) [ SEARCH or CYCLE clause ]
+ *
+ * We don't currently support the SEARCH or CYCLE clause.
+ *
+ * Recognizing WITH_LA here allows a CTE to be named TIME or ORDINALITY.
+ */
+with_clause:
+		WITH cte_list
+			{
+				$$ = {
+					type: _.NodeTag.T_WithClause,
+					ctes: $2,
+					recursive: false,
+					location: @1
+				};
+			}
+		| WITH_LA cte_list
+			{
+				$$ = {
+					type: _.NodeTag.T_WithClause,
+					ctes: $2,
+					recursive: false,
+					location: @1
+				};
+			}
+		| WITH RECURSIVE cte_list
+			{
+				$$ = {
+					type: _.NodeTag.T_WithClause,
+					ctes: $3,
+					recursive: true,
+					location: @1
+				};
+			}
+		;
+
+cte_list:
+		common_table_expr						{ $$ = [$1]; }
+		| cte_list ',' common_table_expr		{ $$ = $1; $1.push($3); }
+		;
+
+common_table_expr:  name opt_name_list AS opt_materialized '(' PreparableStmt ')'
+			{
+				$$ = {
+					type: _.NodeTag.T_CommonTableExpr,
+					ctename: $1,
+					aliascolnames: $2,
+					ctematerialized: $4,
+					ctequery: $6,
+					location: @1
+				};
+			}
+		;
+
+opt_materialized:
+		MATERIALIZED							{ $$ = _.CTEMaterialize.CTEMaterializeAlways; }
+		| NOT MATERIALIZED						{ $$ = _.CTEMaterialize.CTEMaterializeNever; }
+		| /*EMPTY*/								{ $$ = _.CTEMaterialize.CTEMaterializeDefault; }
+		;
+
+opt_with_clause:
+		with_clause								{ $$ = $1; }
+		| /*EMPTY*/								{ $$ = null; }
+		;
+
+into_clause:
+			INTO OptTempTableName
+				{
+					$$ = {
+						type: _.NodeTag.T_IntoClause,
+						rel: $2,
+						colNames: null,
+						options: null,
+						onCommit: ONCOMMIT_NOOP,
+						tableSpaceName: null,
+						viewQuery: null,
+						skipData: false,
+					};
+				}
+			| /*EMPTY*/
+				{ $$ = null; }
+		;
+
+/*
+ * This syntax for group_clause tries to follow the spec quite closely.
+ * However, the spec allows only column references, not expressions,
+ * which introduces an ambiguity between implicit row constructors
+ * (a,b) and lists of column references.
+ *
+ * We handle this by using the a_expr production for what the spec calls
+ * <ordinary grouping set>, which in the spec represents either one column
+ * reference or a parenthesized list of column references. Then, we check the
+ * top node of the a_expr to see if it's an implicit RowExpr, and if so, just
+ * grab and use the list, discarding the node. (this is done in parse analysis,
+ * not here)
+ *
+ * (we abuse the row_format field of RowExpr to distinguish implicit and
+ * explicit row constructors; it's debatable if anyone sanely wants to use them
+ * in a group clause, but if they have a reason to, we make it possible.)
+ *
+ * Each item in the group_clause list is either an expression tree or a
+ * GroupingSet node of some type.
+ */
+group_clause:
+			GROUP_P BY group_by_list				{ $$ = $3; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+group_by_list:
+			group_by_item							{ $$ = [$1]; }
+			| group_by_list ',' group_by_item		{ $$ = $1; $1.push($3); }
+		;
+
+group_by_item:
+			a_expr									{ $$ = $1; }
+			| empty_grouping_set					{ $$ = $1; }
+			| cube_clause							{ $$ = $1; }
+			| rollup_clause							{ $$ = $1; }
+			| grouping_sets_clause					{ $$ = $1; }
+		;
+
+empty_grouping_set:
+			'(' ')'
+				{
+					$$ = _.makeGroupingSet(_.GroupingSetKind.GROUPING_SET_EMPTY, null, @1);
+				}
+		;
+
+/*
+ * These hacks rely on setting precedence of CUBE and ROLLUP below that of '(',
+ * so that they shift in these rules rather than reducing the conflicting
+ * unreserved_keyword rule.
+ */
+
+rollup_clause:
+			ROLLUP '(' expr_list ')'
+				{
+					$$ = _.makeGroupingSet(_.GroupingSetKind.GROUPING_SET_ROLLUP, $3, @1);
+				}
+		;
+
+cube_clause:
+			CUBE '(' expr_list ')'
+				{
+					$$ = _.makeGroupingSet(_.GroupingSetKind.GROUPING_SET_CUBE, $3, @1);
+				}
+		;
+
+grouping_sets_clause:
+			GROUPING SETS '(' group_by_list ')'
+				{
+					$$ = _.makeGroupingSet(_.GroupingSetKind.GROUPING_SET_SETS, $4, @1);
+				}
+		;
+
+having_clause:
+			HAVING a_expr							{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+for_locking_clause:
+			for_locking_items						{ $$ = $1; }
+			| FOR READ ONLY							{ $$ = null; }
+		;
+
+opt_for_locking_clause:
+			for_locking_clause						{ $$ = $1; }
+			| /* EMPTY */							{ $$ = null; }
+		;
+
+for_locking_items:
+			for_locking_item						{ $$ = [$1]; }
+			| for_locking_items for_locking_item	{ $$ = $1; $1.push($2); }
+		;
+
+for_locking_item:
+			for_locking_strength locked_rels_list opt_nowait_or_skip
+				{
+					$$ = {
+						type: _.NodeTag.T_LockingClause,
+						lockedRels: $2,
+						strength: $1,
+						waitPolicy: $3
+					};
+				}
+		;
+
+for_locking_strength:
+			FOR UPDATE 							{ $$ = _.LockClauseStrength.LCS_FORUPDATE; }
+			| FOR NO KEY UPDATE 				{ $$ = _.LockClauseStrength.LCS_FORNOKEYUPDATE; }
+			| FOR SHARE 						{ $$ = _.LockClauseStrength.LCS_FORSHARE; }
+			| FOR KEY SHARE 					{ $$ = _.LockClauseStrength.LCS_FORKEYSHARE; }
+		;
+
+locked_rels_list:
+			OF qualified_name_list					{ $$ = $2; }
+			| /* EMPTY */							{ $$ = null; }
+		;
+
+
+/*
+ * We should allow ROW '(' expr_list ')' too, but that seems to require
+ * making VALUES a fully reserved word, which will probably break more apps
+ * than allowing the noise-word is worth.
+ */
+values_clause:
+			VALUES '(' expr_list ')'
+				{
+					$$ = {
+						type: _.NodeTag.T_SelectStmt,
+						valuesLists: [$3]
+					};
+				}
+			| values_clause ',' '(' expr_list ')'
+				{
+					$$ = $1;
+					$1.valuesLists = $1.valuesLists.concat($4);
+				}
+		;
 
 
 /*****************************************************************************
@@ -838,6 +1289,11 @@ alias_clause:
 				}
 		;
 
+where_clause:
+			WHERE a_expr							{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
 opt_alias_clause: alias_clause						{ $$ = $1; }
 			| /*EMPTY*/								{ $$ = null; }
 		;
@@ -935,6 +1391,235 @@ relation_expr_opt_alias: relation_expr					%prec UMINUS
 				}
 		;
 
+
+/*
+ * Window Definitions
+ */
+window_clause:
+			WINDOW window_definition_list			{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+window_definition_list:
+			window_definition						{ $$ = [$1]; }
+			| window_definition_list ',' window_definition
+													{ $$ = $1; $1.push($3); }
+		;
+
+window_definition:
+			ColId AS window_specification
+				{
+					$$ = $3;
+					$$.name = $1;
+				}
+		;
+
+over_clause: OVER window_specification
+				{ $$ = $2; }
+			| OVER ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						name: $2,
+						refname: null,
+						partitionClause: null,
+						orderClause: null,
+						frameOptions: _.FRAMEOPTION_DEFAULTS,
+						startOffset: null,
+						endOffset: null,
+						location: @2
+					};
+				}
+			| /*EMPTY*/
+				{ $$ = null; }
+		;
+
+window_specification: '(' opt_existing_window_name opt_partition_clause
+						opt_sort_clause opt_frame_clause ')'
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						name: null,
+						refname: $2,
+						partitionClause: $3,
+						orderClause: $4,
+						/* copy relevant fields of opt_frame_clause */
+						frameOptions: $5.frameOptions,
+						startOffset: $5.startOffset,
+						endOffset: $5.endOffset,
+						location: @1
+					};
+				}
+		;
+
+/*
+ * If we see PARTITION, RANGE, ROWS or GROUPS as the first token after the '('
+ * of a window_specification, we want the assumption to be that there is
+ * no existing_window_name; but those keywords are unreserved and so could
+ * be ColIds.  We fix this by making them have the same precedence as IDENT
+ * and giving the empty production here a slightly higher precedence, so
+ * that the shift/reduce conflict is resolved in favor of reducing the rule.
+ * These keywords are thus precluded from being an existing_window_name but
+ * are not reserved for any other purpose.
+ */
+opt_existing_window_name: ColId						{ $$ = $1; }
+			| /*EMPTY*/			/* %prec Op */		{ $$ = null; }
+		;
+
+opt_partition_clause: PARTITION BY expr_list		{ $$ = $3; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+/*
+ * For frame clauses, we return a WindowDef, but only some fields are used:
+ * frameOptions, startOffset, and endOffset.
+ */
+opt_frame_clause:
+			RANGE frame_extent opt_window_exclusion_clause
+				{
+					$$ = $2;
+					$$.frameOptions |= _.FRAMEOPTION_NONDEFAULT | _.FRAMEOPTION_RANGE;
+					$$.frameOptions |= $3;
+				}
+			| ROWS frame_extent opt_window_exclusion_clause
+				{
+					$$ = $2;
+					$$.frameOptions |= _.FRAMEOPTION_NONDEFAULT | _.FRAMEOPTION_ROWS;
+					$$.frameOptions |= $3;
+				}
+			| GROUPS frame_extent opt_window_exclusion_clause
+				{
+					$$ = $2;
+					$$.frameOptions |= _.FRAMEOPTION_NONDEFAULT | _.FRAMEOPTION_GROUPS;
+					$$.frameOptions |= $3;
+				}
+			| /*EMPTY*/
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						frameOptions: _.FRAMEOPTION_DEFAULTS,
+						startOffset: null,
+						endOffset: null
+					};
+				}
+		;
+
+frame_extent: frame_bound
+				{
+					$$ = $1;
+					/* reject invalid cases */
+					if ($$.frameOptions & _.FRAMEOPTION_START_UNBOUNDED_FOLLOWING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame start cannot be UNBOUNDED FOLLOWING"),
+								 parser_errposition(@1)));
+					if ($$.frameOptions & _.FRAMEOPTION_START_OFFSET_FOLLOWING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame starting from following row cannot end with current row"),
+								 parser_errposition(@1)));
+					$$.frameOptions |= _.FRAMEOPTION_END_CURRENT_ROW;
+				}
+			| BETWEEN frame_bound AND frame_bound
+				{
+					var n1 = $2;
+					var n2 = $4;
+					/* form merged options */
+					var frameOptions = n1.frameOptions;
+					/* shift converts START_ options to END_ options */
+					frameOptions |= n2.frameOptions << 1;
+					frameOptions |= _.FRAMEOPTION_BETWEEN;
+					/* reject invalid cases */
+					if (frameOptions & _.FRAMEOPTION_START_UNBOUNDED_FOLLOWING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame start cannot be UNBOUNDED FOLLOWING"),
+								 parser_errposition(@2)));
+					if (frameOptions & _.FRAMEOPTION_END_UNBOUNDED_PRECEDING)
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame end cannot be UNBOUNDED PRECEDING"),
+								 parser_errposition(@4)));
+					if ((frameOptions & _.FRAMEOPTION_START_CURRENT_ROW) &&
+						(frameOptions & _.FRAMEOPTION_END_OFFSET_PRECEDING))
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame starting from current row cannot have preceding rows"),
+								 parser_errposition(@4)));
+					if ((frameOptions & _.FRAMEOPTION_START_OFFSET_FOLLOWING) &&
+						(frameOptions & (_.FRAMEOPTION_END_OFFSET_PRECEDING |
+										 _.FRAMEOPTION_END_CURRENT_ROW)))
+						ereport(ERROR,
+								(errcode(ERRCODE_WINDOWING_ERROR),
+								 errmsg("frame starting from following row cannot have preceding rows"),
+								 parser_errposition(@4)));
+					n1.frameOptions = frameOptions;
+					n1.endOffset = n2.startOffset;
+					$$ = n1;
+				}
+		;
+
+/*
+ * This is used for both frame start and frame end, with output set up on
+ * the assumption it's frame start; the frame_extent productions must reject
+ * invalid cases.
+ */
+frame_bound:
+			UNBOUNDED PRECEDING
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						frameOptions: _.FRAMEOPTION_START_UNBOUNDED_PRECEDING,
+						startOffset: null,
+						endOffset: null
+					};
+				}
+			| UNBOUNDED FOLLOWING
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						frameOptions: _.FRAMEOPTION_START_UNBOUNDED_FOLLOWING,
+						startOffset: null,
+						endOffset: null
+					};
+				}
+			| CURRENT_P ROW
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						frameOptions: _.FRAMEOPTION_START_CURRENT_ROW,
+						startOffset: null,
+						endOffset: null
+					};
+				}
+			| a_expr PRECEDING
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						frameOptions: _.FRAMEOPTION_START_OFFSET_PRECEDING,
+						startOffset: $1,
+						endOffset: null
+					};
+				}
+			| a_expr FOLLOWING
+				{
+					$$ = {
+						type: _.NodeTag.T_WindowDef,
+						frameOptions: _.FRAMEOPTION_START_OFFSET_FOLLOWING,
+						startOffset: $1,
+						endOffset: null
+					};
+				}
+		;
+
+opt_window_exclusion_clause:
+			EXCLUDE CURRENT_P ROW	{ $$ = _.FRAMEOPTION_EXCLUDE_CURRENT_ROW; }
+			| EXCLUDE GROUP_P		{ $$ = _.FRAMEOPTION_EXCLUDE_GROUP; }
+			| EXCLUDE TIES			{ $$ = _.FRAMEOPTION_EXCLUDE_TIES; }
+			| EXCLUDE NO OTHERS		{ $$ = 0; }
+			| /*EMPTY*/				{ $$ = 0; }
+		;
+
 /*
  * TABLESAMPLE decoration in a FROM item
  */
@@ -943,7 +1628,7 @@ tablesample_clause:
 				{
 					$$ = {
 						type: _.NodeTag.T_RangeTableSample,
-						/* n->relation will be filled in later */
+						/* n.relation will be filled in later */
 						method: $2,
 						args: $4,
 						repeatable: $6,
@@ -1603,7 +2288,7 @@ a_expr:		c_expr									{ $$ = $1; }
 											   @2);
 				}
 			| '+' a_expr					%prec UMINUS
-				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "+", NULL, $2, @1); }
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "+", null, $2, @1); }
 			| '-' a_expr					%prec UMINUS
 				{ $$ = _.doNegate($2, @1); }
 			| a_expr '+' a_expr
@@ -1669,6 +2354,87 @@ type_name_list:
 			| type_name_list ',' Typename			{ $1.push($3); $$ = $1; }
 		;
 
+/*****************************************************************************
+ *
+ *	target list for SELECT
+ *
+ *****************************************************************************/
+
+opt_target_list: target_list						{ $$ = $1; }
+			| /* EMPTY */							{ $$ = null; }
+		;
+
+target_list:
+			target_el								{ $$ = [$1]; }
+			| target_list ',' target_el				{ $$ = $1; $1.push($3); }
+		;
+
+target_el:	a_expr AS ColLabel
+				{
+					$$ = {
+						type: _.NodeTag.T_ResTarget,
+						name: $3,
+						indirection: null,
+						val: $1,
+						location: @1
+					}
+				}
+			/*
+			 * We support omitting AS only for column labels that aren't
+			 * any known keyword.  There is an ambiguity against postfix
+			 * operators: is "a ! b" an infix expression, or a postfix
+			 * expression and a column label?  We prefer to resolve this
+			 * as an infix expression, which we accomplish by assigning
+			 * IDENT a precedence higher than POSTFIXOP.
+			 */
+			| a_expr IDENT
+				{
+					$$ = {
+						type: _.NodeTag.T_ResTarget,
+						name: $2,
+						indirection: null,
+						val: $1,
+						location: @1
+					}
+				}
+			| a_expr
+				{
+					$$ = {
+						type: _.NodeTag.T_ResTarget,
+						name: null,
+						indirection: null,
+						val: $1,
+						location: @1
+					}
+				}
+			| '*'
+				{
+					$$ = {
+						type: _.NodeTag.T_ResTarget,
+						name: null,
+						indirection: null,
+						val: {
+							type: _.NodeTag.T_ColumnRef,
+							fields: [{ type: _.NodeTag.T_A_Star }],
+							location: @1
+						},
+						location: @1
+					}
+				}
+		;
+
+
+/*****************************************************************************
+ *
+ *	Names and constants
+ *
+ *****************************************************************************/
+
+qualified_name_list:
+			qualified_name							{ $$ = [$1]; }
+			| qualified_name_list ',' qualified_name { $$ = $1; $1.push($3); }
+		;
+
 /*
  * The production for a qualified relation name has to exactly match the
  * production for a qualified func_name, because in a FROM clause we cannot
@@ -1710,6 +2476,11 @@ qualified_name:
 				}
 		;
 
+opt_name_list:
+			'(' name_list ')'						{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
 name_list:	name
 					{ $$ = [_.makeString($1)]; }
 			| name_list ',' name
@@ -1731,6 +2502,24 @@ index_name: ColId									{ $$ = $1; };
 
 file_name:	Sconst									{ $$ = $1; };
 
+
+opt_table:	TABLE									{}
+			| /*EMPTY*/								{}
+		;
+
+all_or_distinct:
+			ALL										{ $$ = true; }
+			| DISTINCT								{ $$ = false; }
+			| /*EMPTY*/								{ $$ = false; }
+		;
+
+/* We use (NIL) as a placeholder to indicate that all target expressions
+ * should be placed in the DISTINCT list during parsetree analysis.
+ */
+distinct_clause:
+			DISTINCT								{ $$ = []; }
+			| DISTINCT ON '(' expr_list ')'			{ $$ = $4; }
+		;
 
 opt_all_clause:
 			ALL										{ $$ = null;}

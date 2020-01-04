@@ -1,6 +1,7 @@
 import { makeString, Value } from "./value";
 import { NodeTag } from './tags';
-import { Node } from './node';
+import { Node, OnConflictAction } from './node';
+import { IntoClause, Expr, RangeVar } from "./primnodes";
 
 export interface ColumnRef extends Node<NodeTag.T_ColumnRef> {
   fields: any[];
@@ -38,8 +39,8 @@ export enum A_Expr_Kind
 export interface A_Expr extends Node<NodeTag.T_A_Expr> {
 	kind: A_Expr_Kind;		/* see above */
 	name: Node<NodeTag.T_String>[];    			/* possibly-qualified name of operator */
-	lexpr: Node<any> | null;		    	/* left argument, or NULL if none */
-	rexpr: Node<any> | null;			    /* right argument, or NULL if none */
+	lexpr: Expr | null;		    	/* left argument, or NULL if none */
+	rexpr: Expr | null;			    /* right argument, or NULL if none */
 	location: number;		  /* token location, or -1 if unknown */
 }
 
@@ -77,7 +78,7 @@ export interface TypeName extends Node<NodeTag.T_TypeName> {
 /*
  * TypeCast - a CAST expression
  */
-export interface TypeCast<T extends NodeTag> extends Node<NodeTag.T_TypeCast> {
+export interface TypeCast<T extends NodeTag = any> extends Node<NodeTag.T_TypeCast> {
 	arg: Node<T>;			/* the expression being casted */
 	typeName: TypeName;		/* the target type */
 	location: number;		/* token location, or -1 if unknown */
@@ -145,6 +146,289 @@ export interface A_ArrayExpr extends Node<NodeTag.T_ArrayExpr>
 	elements: Node<any>[];		/* array element expressions */
 	location: number;		      /* token location, or -1 if unknown */
 }
+
+/*
+ * ResTarget -
+ *	  result target (used in target list of pre-transformed parse trees)
+ *
+ * In a SELECT target list, 'name' is the column label from an
+ * 'AS ColumnLabel' clause, or NULL if there was none, and 'val' is the
+ * value expression itself.  The 'indirection' field is not used.
+ *
+ * INSERT uses ResTarget in its target-column-names list.  Here, 'name' is
+ * the name of the destination column, 'indirection' stores any subscripts
+ * attached to the destination, and 'val' is not used.
+ *
+ * In an UPDATE target list, 'name' is the name of the destination column,
+ * 'indirection' stores any subscripts attached to the destination, and
+ * 'val' is the expression to assign.
+ *
+ * See A_Indirection for more info about what can appear in 'indirection'.
+ */
+export interface ResTarget extends Node<NodeTag.T_ResTarget>
+{
+	name: string;			/* column name or NULL */
+	indirection: A_Indirection[] | null;	/* subscripts, field names, and '*', or NIL */
+	val: Expr;			/* the value expression to compute or assign */
+	location: number;		/* token location, or -1 if unknown */
+}
+
+/*
+ * WindowDef - raw representation of WINDOW and OVER clauses
+ *
+ * For entries in a WINDOW list, "name" is the window name being defined.
+ * For OVER clauses, we use "name" for the "OVER window" syntax, or "refname"
+ * for the "OVER (window)" syntax, which is subtly different --- the latter
+ * implies overriding the window frame clause.
+ */
+export interface WindowDef extends Node<NodeTag.T_WindowDef>
+{
+	name: string;			/* window's own name */
+	refname: string;		/* referenced window name, if any */
+	partitionClause: unknown[];	/* PARTITION BY expression list */
+	orderClause: unknown[];	/* ORDER BY (list of SortBy) */
+	frameOptions: number;	/* frame_clause options, see below */
+	startOffset: unknown;	/* expression for starting bound, if any */
+	endOffset: unknown;		/* expression for ending bound, if any */
+	location: number;		/* parse location, or -1 if none/unknown */
+}
+
+/*
+ * frameOptions is an OR of these bits.  The NONDEFAULT and BETWEEN bits are
+ * used so that ruleutils.c can tell which properties were specified and
+ * which were defaulted; the correct behavioral bits must be set either way.
+ * The START_foo and END_foo options must come in pairs of adjacent bits for
+ * the convenience of gram.y, even though some of them are useless/invalid.
+ */
+export const FRAMEOPTION_NONDEFAULT = 					0x00001 /* any specified? */
+export const FRAMEOPTION_RANGE = 						0x00002 /* RANGE behavior */
+export const FRAMEOPTION_ROWS = 						0x00004 /* ROWS behavior */
+export const FRAMEOPTION_GROUPS = 						0x00008 /* GROUPS behavior */
+export const FRAMEOPTION_BETWEEN = 						0x00010 /* BETWEEN given? */
+export const FRAMEOPTION_START_UNBOUNDED_PRECEDING = 	0x00020 /* start is U. P. */
+export const FRAMEOPTION_END_UNBOUNDED_PRECEDING = 		0x00040 /* (disallowed) */
+export const FRAMEOPTION_START_UNBOUNDED_FOLLOWING = 	0x00080 /* (disallowed) */
+export const FRAMEOPTION_END_UNBOUNDED_FOLLOWING = 		0x00100 /* end is U. F. */
+export const FRAMEOPTION_START_CURRENT_ROW = 			0x00200 /* start is C. R. */
+export const FRAMEOPTION_END_CURRENT_ROW = 				0x00400 /* end is C. R. */
+export const FRAMEOPTION_START_OFFSET_PRECEDING = 		0x00800 /* start is O. P. */
+export const FRAMEOPTION_END_OFFSET_PRECEDING = 		0x01000 /* end is O. P. */
+export const FRAMEOPTION_START_OFFSET_FOLLOWING = 		0x02000 /* start is O. F. */
+export const FRAMEOPTION_END_OFFSET_FOLLOWING = 		0x04000 /* end is O. F. */
+export const FRAMEOPTION_EXCLUDE_CURRENT_ROW = 			0x08000 /* omit C.R. */
+export const FRAMEOPTION_EXCLUDE_GROUP = 				0x10000 /* omit C.R. & peers */
+export const FRAMEOPTION_EXCLUDE_TIES = 				0x20000 /* omit C.R.'s peers */
+
+export const FRAMEOPTION_START_OFFSET = 
+	(FRAMEOPTION_START_OFFSET_PRECEDING | FRAMEOPTION_START_OFFSET_FOLLOWING)
+export const FRAMEOPTION_END_OFFSET = 
+	(FRAMEOPTION_END_OFFSET_PRECEDING | FRAMEOPTION_END_OFFSET_FOLLOWING)
+export const FRAMEOPTION_EXCLUSION = 
+	(FRAMEOPTION_EXCLUDE_CURRENT_ROW | FRAMEOPTION_EXCLUDE_GROUP |
+	 FRAMEOPTION_EXCLUDE_TIES)
+
+export const FRAMEOPTION_DEFAULTS = 
+	(FRAMEOPTION_RANGE | FRAMEOPTION_START_UNBOUNDED_PRECEDING |
+	 FRAMEOPTION_END_CURRENT_ROW)
+
+/*
+ * WithClause -
+ *	   representation of WITH clause
+ *
+ * Note: WithClause does not propagate into the Query representation;
+ * but CommonTableExpr does.
+ */
+export interface WithClause extends Node<NodeTag.T_WithClause>
+{
+	ctes: unknown[];			/* list of CommonTableExprs */
+	recursive: boolean;		/* true = WITH RECURSIVE */
+	location: number;		/* token location, or -1 if unknown */
+}
+
+/*
+ * InferClause -
+ *		ON CONFLICT unique index inference clause
+ *
+ * Note: InferClause does not propagate into the Query representation.
+ */
+export interface InferClause extends Node<NodeTag.T_InferClause>
+{
+	indexElems: unknown[];		/* IndexElems to infer unique index */
+	whereClause: A_Expr;	/* qualification (partial-index predicate) */
+	conname: string;		/* Constraint name, or NULL if unnamed */
+	location: number;		/* token location, or -1 if unknown */
+};
+
+/*
+ * OnConflictClause -
+ *		representation of ON CONFLICT clause
+ *
+ * Note: OnConflictClause does not propagate into the Query representation.
+ */
+export interface OnConflictClause extends Node<NodeTag.T_OnConflictClause>
+{
+	action: OnConflictAction;	/* DO NOTHING or UPDATE? */
+	infer: InferClause;			/* Optional index inference clause */
+	targetList: ResTarget[];		/* the target list (of ResTarget) */
+	whereClause: unknown;	/* qualifications */
+	location: number;		/* token location, or -1 if unknown */
+}
+
+/*
+ * CommonTableExpr -
+ *	   representation of WITH list element
+ *
+ * We don't currently support the SEARCH or CYCLE clause.
+ */
+export enum CTEMaterialize
+{
+	CTEMaterializeDefault,		/* no option specified */
+	CTEMaterializeAlways,		/* MATERIALIZED */
+	CTEMaterializeNever			/* NOT MATERIALIZED */
+}
+
+export interface CommonTableExpr extends Node<NodeTag.T_CommonTableExpr>
+{
+	ctename: string;		/* query name (never qualified) */
+	aliascolnames: unknown[];	/* optional list of column names */
+	ctematerialized: CTEMaterialize; /* is this an optimization fence? */
+	/* SelectStmt/InsertStmt/etc before parse analysis, Query afterwards: */
+	ctequery: unknown;		/* the CTE's subquery */
+	location: number;		/* token location, or -1 if unknown */
+	/* These fields are set during parse analysis: */
+	cterecursive: boolean;	/* is this CTE actually recursive? */
+	cterefcount: number;	/* number of RTEs referencing this CTE
+								 * (excluding internal self-references) */
+	ctecolnames: unknown[];	/* list of output column names */
+	ctecoltypes: unknown[];	/* OID list of output column type OIDs */
+	ctecoltypmods: unknown[];	/* integer list of output column typmods */
+	ctecolcollations: unknown[];	/* OID list of column collation OIDs */
+}
+
+export enum SetOperation
+{
+	SETOP_NONE = 0,
+	SETOP_UNION,
+	SETOP_INTERSECT,
+	SETOP_EXCEPT
+}
+
+/*
+ * GroupingSet -
+ *		representation of CUBE, ROLLUP and GROUPING SETS clauses
+ *
+ * In a Query with grouping sets, the groupClause contains a flat list of
+ * SortGroupClause nodes for each distinct expression used.  The actual
+ * structure of the GROUP BY clause is given by the groupingSets tree.
+ *
+ * In the raw parser output, GroupingSet nodes (of all types except SIMPLE
+ * which is not used) are potentially mixed in with the expressions in the
+ * groupClause of the SelectStmt.  (An expression can't contain a GroupingSet,
+ * but a list may mix GroupingSet and expression nodes.)  At this stage, the
+ * content of each node is a list of expressions, some of which may be RowExprs
+ * which represent sublists rather than actual row constructors, and nested
+ * GroupingSet nodes where legal in the grammar.  The structure directly
+ * reflects the query syntax.
+ *
+ * In parse analysis, the transformed expressions are used to build the tlist
+ * and groupClause list (of SortGroupClause nodes), and the groupingSets tree
+ * is eventually reduced to a fixed format:
+ *
+ * EMPTY nodes represent (), and obviously have no content
+ *
+ * SIMPLE nodes represent a list of one or more expressions to be treated as an
+ * atom by the enclosing structure; the content is an integer list of
+ * ressortgroupref values (see SortGroupClause)
+ *
+ * CUBE and ROLLUP nodes contain a list of one or more SIMPLE nodes.
+ *
+ * SETS nodes contain a list of EMPTY, SIMPLE, CUBE or ROLLUP nodes, but after
+ * parse analysis they cannot contain more SETS nodes; enough of the syntactic
+ * transforms of the spec have been applied that we no longer have arbitrarily
+ * deep nesting (though we still preserve the use of cube/rollup).
+ *
+ * Note that if the groupingSets tree contains no SIMPLE nodes (only EMPTY
+ * nodes at the leaves), then the groupClause will be empty, but this is still
+ * an aggregation query (similar to using aggs or HAVING without GROUP BY).
+ *
+ * As an example, the following clause:
+ *
+ * GROUP BY GROUPING SETS ((a,b), CUBE(c,(d,e)))
+ *
+ * looks like this after raw parsing:
+ *
+ * SETS( RowExpr(a,b) , CUBE( c, RowExpr(d,e) ) )
+ *
+ * and parse analysis converts it to:
+ *
+ * SETS( SIMPLE(1,2), CUBE( SIMPLE(3), SIMPLE(4,5) ) )
+ */
+export enum GroupingSetKind
+{
+	GROUPING_SET_EMPTY,
+	GROUPING_SET_SIMPLE,
+	GROUPING_SET_ROLLUP,
+	GROUPING_SET_CUBE,
+	GROUPING_SET_SETS
+}
+
+export interface GroupingSet extends Node<NodeTag.T_GroupingSet>
+{
+	kind: GroupingSetKind;
+	content: A_Expr[];
+	location: number;
+}
+
+
+interface BaseSelectStmt extends Node<NodeTag.T_SelectStmt> {
+	/*
+	 * These fields are used in both "leaf" SelectStmts and upper-level
+	 * SelectStmts.
+	 */
+	sortClause?: unknown[];		/* sort clause (a list of SortBy's) */
+	limitOffset?: unknown;	/* # of result tuples to skip */
+	limitCount?: unknown;		/* # of result tuples to return */
+	lockingClause?: unknown[];	/* FOR UPDATE (list of LockingClause's) */
+	withClause?: WithClause;		/* WITH clause */
+}
+
+interface LeafSelectStmt extends BaseSelectStmt {
+	/*
+	 * These fields are used only in "leaf" SelectStmts.
+	 */
+	distinctClause?: unknown[];  /* NULL, list of DISTINCT ON exprs, or
+								 * lcons(NIL,NIL) for all (SELECT DISTINCT) */
+	intoClause?: IntoClause;		/* target for SELECT INTO */
+	targetList: ResTarget[];	/* the target list (of ResTarget) */
+	fromClause: Array<RangeVar | SelectStmt>;		/* the FROM clause */
+	whereClause?: A_Expr;	/* WHERE qualification */
+	groupClause?: unknown[];	/* GROUP BY clauses */
+	havingClause?: unknown;	/* HAVING conditional-expression */
+	windowClause?: unknown[];	/* WINDOW window_name AS (...), ... */
+
+	/*
+	 * In a "leaf" node representing a VALUES list, the above fields are all
+	 * null, and instead this field is set.  Note that the elements of the
+	 * sublists are just expressions, without ResTarget decoration. Also note
+	 * that a list element can be DEFAULT (represented as a SetToDefault
+	 * node), regardless of the context of the VALUES list. It's up to parse
+	 * analysis to reject that where not valid.
+	 */
+	valuesLists: unknown[];	/* untransformed list of expression lists */
+}
+
+interface UpperLevelSelectStmt extends BaseSelectStmt {
+	/*
+	 * These fields are used only in upper-level SelectStmts.
+	 */
+	op: SetOperation;			/* type of set op */
+	all: boolean;			/* ALL specified? */
+	larg?: SelectStmt;	/* left child */
+	rarg?: SelectStmt;	/* right child */
+	/* Eventually add fields for CORRESPONDING spec here */
+}
+
+export type SelectStmt = LeafSelectStmt | UpperLevelSelectStmt;
 
 export function makeColumnRef(colname: string, indirection: any[], location: number, yyscanner: unknown) {
   /*

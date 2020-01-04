@@ -1,7 +1,7 @@
 import { Node, IsA } from './node';
 import { RangeVar, Var, Index, AttrNumber, Oid, BoolExpr, BoolExprType, FromExpr, Const, Alias, Expr } from "./primnodes";
 import { NodeTag } from "./tags";
-import { TypeName, A_Expr, A_Expr_Kind } from "./parsenodes";
+import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation } from "./parsenodes";
 import { makeString, Value } from "./value";
 import { BoolGetDatum } from './datum';
 import { BOOLOID } from '../common/pg_type_d';
@@ -12,7 +12,7 @@ import { RELPERSISTENCE_PERMANENT } from '../common/pg_class_d';
  *		makes an A_Expr node
  */
 export function makeA_Expr(kind: A_Expr_Kind, name: Node<NodeTag.T_String>[],
-		   lexpr: Node<any>, rexpr: Node<any>, location: number): A_Expr
+		   lexpr: Expr, rexpr: Expr, location: number): A_Expr
 {
     return {
         type: NodeTag.T_A_Expr,
@@ -29,7 +29,7 @@ export function makeA_Expr(kind: A_Expr_Kind, name: Node<NodeTag.T_String>[],
  *		As above, given a simple (unqualified) operator name
  */
 export function makeSimpleA_Expr(kind: A_Expr_Kind, name: string,
-				 lexpr: Node<any> | null, rexpr: Node<any> | null, location: number): A_Expr
+				 lexpr: Expr | null, rexpr: Expr | null, location: number): A_Expr
 {
     return {
         type: NodeTag.T_A_Expr,
@@ -301,4 +301,29 @@ export function makeOrExpr(lexpr: Node<any> | null, rexpr: Node<any> | null, loc
 export function makeNotExpr(expr: Expr, location: number)
 {
 	return makeBoolExpr(BoolExprType.NOT_EXPR, [expr], location);
+}
+
+/*
+ * makeGroupingSet
+ *
+ */
+export function makeGroupingSet(kind: GroupingSetKind, content: A_Expr[], location: number): GroupingSet
+{
+	return {
+		type: NodeTag.T_GroupingSet,
+		kind,
+		content,
+		location
+	};
+}
+
+export function makeSetOp(op: SetOperation, all: boolean, larg: SelectStmt, rarg: SelectStmt): SelectStmt
+{
+	return {
+		type: NodeTag.T_SelectStmt,
+		op,
+		all,
+		larg,
+		rarg
+	};
 }

@@ -1,6 +1,6 @@
 import { Node, JoinType, OnConflictAction } from "./node";
 import { NodeTag } from "./tags";
-import { Value } from ".";
+import { Value } from "./value";
 
 
 /* ----------------------------------------------------------------
@@ -112,6 +112,14 @@ export interface Alias extends Node<NodeTag.T_Alias> {
 	colnames: Value<NodeTag.T_String>[];		/* optional list of column aliases */
 }
 
+enum OnCommitAction
+{
+	ONCOMMIT_NOOP,				/* No ON COMMIT clause (do nothing) */
+	ONCOMMIT_PRESERVE_ROWS,		/* ON COMMIT PRESERVE ROWS (do nothing) */
+	ONCOMMIT_DELETE_ROWS,		/* ON COMMIT DELETE ROWS */
+	ONCOMMIT_DROP				/* ON COMMIT DROP */
+}
+
 /*
  * RangeVar - range variable, used in FROM clauses
  *
@@ -152,6 +160,26 @@ export interface TableFunc extends Node<NodeTag.T_TableFunc>
 	// notnulls: Bitmapset;		/* nullability flag for each output column */
 	ordinalitycol: number;		/* counts from 0; -1 if none specified */
 	location: number;			/* token location, or -1 if unknown */
+}
+
+/*
+ * IntoClause - target information for SELECT INTO, CREATE TABLE AS, and
+ * CREATE MATERIALIZED VIEW
+ *
+ * For CREATE MATERIALIZED VIEW, viewQuery is the parsed-but-not-rewritten
+ * SELECT Query for the view; otherwise it's NULL.  (Although it's actually
+ * Query*, we declare it as Node* to avoid a forward reference.)
+ */
+export interface IntoClause extends Node<NodeTag.T_IntoClause>
+{
+	rel: RangeVar;			/* target relation name */
+	colNames: Value<NodeTag.T_String>[];		/* column names to assign, or NIL */
+	accessMethod: string;	/* table access method */
+	options: unknown[];		/* options from WITH clause */
+	onCommit: OnCommitAction;	/* what do we do at COMMIT? */
+	tableSpaceName: string; /* table space to use, or NULL */
+	viewQuery: Node<any>;		/* materialized view's SELECT query */
+	skipData: boolean;		/* true for WITH NO DATA */
 }
 
 

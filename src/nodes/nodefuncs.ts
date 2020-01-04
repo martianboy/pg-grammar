@@ -31,12 +31,14 @@ import { NodeTag } from "./tags";
  * coercions) will have location -1, and so we can have odd combinations of
  * known and unknown locations in a tree.
  */
-export function exprLocation(expr: Expr): number
+export function exprLocation(expr: any | any[]): number
 {
 	let loc: number;
 
 	if (expr == null)
         return -1;
+
+	if (Array.isArray(expr)) return exprLocation(expr[0]);
 
 	switch (expr.type)
 	{

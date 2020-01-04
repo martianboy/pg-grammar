@@ -3,6 +3,7 @@ import { TypeName, TypeCast, A_Const, A_Expr_Kind } from "./parsenodes";
 import { NodeTag } from "./tags";
 import { Value } from "./value";
 import { SystemTypeName, makeSimpleA_Expr } from "./makefuncs";
+import { Expr } from "./primnodes";
 
 export function makeTypeCast<T extends NodeTag>(arg: Node<T>, typename: TypeName, location: number): TypeCast<T> {
 	return {
@@ -130,7 +131,7 @@ export function makeBoolAConst(state: boolean, location: number): TypeCast<NodeT
  * negative constants.	It's better to leave "-123.456" in string form
  * until we know what the desired type is.
  */
-export function doNegate<T extends NodeTag>(n: Node<T>, location: number)
+export function doNegate(n: Expr, location: number)
 {
 	if (IsA(n, 'A_Const'))
 	{
