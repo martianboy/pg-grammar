@@ -652,7 +652,7 @@ select_no_parens:
 			| select_clause opt_sort_clause for_locking_clause opt_select_limit
 				{
 					_.insertSelectOptions($1, $2, $3,
-										list_nth($4, 0), list_nth($4, 1),
+										$4[0], $4[1],
 										null,
 										yyscanner);
 					$$ = $1;
@@ -660,7 +660,7 @@ select_no_parens:
 			| select_clause opt_sort_clause select_limit opt_for_locking_clause
 				{
 					_.insertSelectOptions($1, $2, $4,
-										list_nth($3, 0), list_nth($3, 1),
+										$3[0], $3[1],
 										null,
 										yyscanner);
 					$$ = $1;
@@ -684,7 +684,7 @@ select_no_parens:
 			| with_clause select_clause opt_sort_clause for_locking_clause opt_select_limit
 				{
 					_.insertSelectOptions($2, $3, $4,
-										list_nth($5, 0), list_nth($5, 1),
+										$5[0], $5[1],
 										$1,
 										yyscanner);
 					$$ = $2;
@@ -692,7 +692,7 @@ select_no_parens:
 			| with_clause select_clause opt_sort_clause select_limit opt_for_locking_clause
 				{
 					_.insertSelectOptions($2, $3, $5,
-										list_nth($4, 0), list_nth($4, 1),
+										$4[0], $4[1],
 										$1,
 										yyscanner);
 					$$ = $2;
@@ -1026,6 +1026,85 @@ values_clause:
 
 /*****************************************************************************
  *
+ *		QUERY:
+ *				LOCK TABLE
+ *
+ *****************************************************************************/
+
+LockStmt:	LOCK_P opt_table relation_expr_list opt_lock opt_nowait
+				{
+					LockStmt *n = makeNode(LockStmt);
+
+					n->relations = $3;
+					n->mode = $4;
+					n->nowait = $5;
+					$$ = (Node *)n;
+				}
+		;
+
+opt_lock:	IN_P lock_type MODE				{ $$ = $2; }
+			| /*EMPTY*/						{ $$ = _.AccessExclusiveLock; }
+		;
+
+lock_type:	ACCESS SHARE					{ $$ = _.AccessShareLock; }
+			| ROW SHARE						{ $$ = _.RowShareLock; }
+			| ROW EXCLUSIVE					{ $$ = _.RowExclusiveLock; }
+			| SHARE UPDATE EXCLUSIVE		{ $$ = _.ShareUpdateExclusiveLock; }
+			| SHARE							{ $$ = _.ShareLock; }
+			| SHARE ROW EXCLUSIVE			{ $$ = _.ShareRowExclusiveLock; }
+			| EXCLUSIVE						{ $$ = _.ExclusiveLock; }
+			| ACCESS EXCLUSIVE				{ $$ = _.AccessExclusiveLock; }
+		;
+
+opt_nowait:	NOWAIT							{ $$ = true; }
+			| /*EMPTY*/						{ $$ = false; }
+		;
+
+opt_nowait_or_skip:
+			NOWAIT							{ $$ = _.LockWaitPolicy.LockWaitError; }
+			| SKIP LOCKED					{ $$ = _.LockWaitPolicy.LockWaitSkip; }
+			| /*EMPTY*/						{ $$ = _.LockWaitPolicy.LockWaitBlock; }
+		;
+
+
+/*****************************************************************************
+ *
+ *		QUERY:
+ *				UpdateStmt (UPDATE)
+ *
+ *****************************************************************************/
+
+UpdateStmt: opt_with_clause UPDATE relation_expr_opt_alias
+			SET set_clause_list
+			from_clause
+			where_or_current_clause
+			returning_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_UpdateStmt,
+						relation: $3,
+						targetList: $5,
+						fromClause: $6,
+						whereClause: $7,
+						returningList: $8,
+						withClause: $1
+					};
+				}
+		;
+
+set_clause_list:
+			set_clause							{ $$ = $1; }
+			| set_clause_list ',' set_clause	{ $$ = $1.concat($3 || []); }
+		;
+
+set_target_list:
+			set_target								{ $$ = [$1]; }
+			| set_target_list ',' set_target		{ $$ = $1; $1.push($3); }
+		;
+
+
+/*****************************************************************************
+ *
  *	clauses common to all Optimizable Stmts:
  *		from_clause		- allow list of both JOIN expressions and table names
  *		where_clause	- qualifications for joins or restrictions
@@ -1289,15 +1368,40 @@ alias_clause:
 				}
 		;
 
-where_clause:
-			WHERE a_expr							{ $$ = $2; }
-			| /*EMPTY*/								{ $$ = null; }
-		;
-
 opt_alias_clause: alias_clause						{ $$ = $1; }
 			| /*EMPTY*/								{ $$ = null; }
 		;
 
+/*
+ * func_alias_clause can include both an Alias and a coldeflist, so we make it
+ * return a 2-element list that gets disassembled by calling production.
+ */
+func_alias_clause:
+			alias_clause
+				{
+					$$ = [$1, NIL];
+				}
+			| AS '(' TableFuncElementList ')'
+				{
+					$$ = [NULL, $3];
+				}
+			| AS ColId '(' TableFuncElementList ')'
+				{
+					Alias *a = makeNode(Alias);
+					a->aliasname = $2;
+					$$ = [a, $4];
+				}
+			| ColId '(' TableFuncElementList ')'
+				{
+					Alias *a = makeNode(Alias);
+					a->aliasname = $1;
+					$$ = [a, $3];
+				}
+			| /*EMPTY*/
+				{
+					$$ = [NULL, NIL];
+				}
+		;
 
 join_type:	FULL join_outer							{ $$ = _.JoinType.JOIN_FULL; }
 			| LEFT join_outer						{ $$ = _.JoinType.JOIN_LEFT; }
@@ -1391,6 +1495,27 @@ relation_expr_opt_alias: relation_expr					%prec UMINUS
 				}
 		;
 
+/*
+ * TABLESAMPLE decoration in a FROM item
+ */
+tablesample_clause:
+			TABLESAMPLE func_name '(' expr_list ')' opt_repeatable_clause
+				{
+					/* $$.relation will be filled in later */
+					$$ = {
+						type: _.NodeTag.T_RangeTableSample,
+						method: $2,
+						args: $4,
+						repeatable: $6,
+						location: @2,
+					};
+				}
+		;
+
+opt_repeatable_clause:
+			REPEATABLE '(' a_expr ')'	{ $$ = $3; }
+			| /*EMPTY*/					{ $$ = NULL; }
+		;
 
 /*
  * Window Definitions
@@ -1640,6 +1765,117 @@ tablesample_clause:
 opt_repeatable_clause:
 			REPEATABLE '(' a_expr ')'	{ $$ = $3; }
 			| /*EMPTY*/					{ $$ = null; }
+		;
+
+/*
+ * func_table represents a function invocation in a FROM list. It can be
+ * a plain function call, like "foo(...)", or a ROWS FROM expression with
+ * one or more function calls, "ROWS FROM (foo(...), bar(...))",
+ * optionally with WITH ORDINALITY attached.
+ * In the ROWS FROM syntax, a column definition list can be given for each
+ * function, for example:
+ *     ROWS FROM (foo() AS (foo_res_a text, foo_res_b text),
+ *                bar() AS (bar_res_a text, bar_res_b text))
+ * It's also possible to attach a column definition list to the RangeFunction
+ * as a whole, but that's handled by the table_ref production.
+ */
+func_table: func_expr_windowless opt_ordinality
+				{
+					/* alias and coldeflist are set by table_ref production */
+					$$ = {
+						type: _.NodeTag.T_RangeFunction,
+						lateral: false,
+						ordinality: $2,
+						is_rowsfrom: false,
+						functions: [[$1, NIL]],
+					};
+				}
+			| ROWS FROM '(' rowsfrom_list ')' opt_ordinality
+				{
+					/* alias and coldeflist are set by table_ref production */
+					$$ = {
+						type: _.NodeTag.T_RangeFunction,
+						lateral: false,
+						ordinality: $6,
+						is_rowsfrom: true,
+						functions: $4,
+					}
+				}
+		;
+
+rowsfrom_item: func_expr_windowless opt_col_def_list
+				{ $$ = [$1, $2]; }
+		;
+
+rowsfrom_list:
+			rowsfrom_item						{ $$ = [$1]; }
+			| rowsfrom_list ',' rowsfrom_item	{ $$ = $1; $1.push($3); }
+		;
+
+opt_col_def_list: AS '(' TableFuncElementList ')'	{ $$ = $3; }
+			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+opt_ordinality: WITH_LA ORDINALITY					{ $$ = true; }
+			| /*EMPTY*/								{ $$ = false; }
+		;
+
+where_clause:
+			WHERE a_expr							{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = null; }
+		;
+
+/* variant for UPDATE and DELETE */
+where_or_current_clause:
+			WHERE a_expr							{ $$ = $2; }
+			| WHERE CURRENT_P OF cursor_name
+				{
+					/* cvarno is filled in by parse analysis */
+					$$ = {
+						type: _.NodeTag.T_CurrentOfExpr,
+						cursor_name: $4,
+						cursor_param: 0
+					};
+				}
+			| /*EMPTY*/								{ $$ = NULL; }
+		;
+
+
+OptTableFuncElementList:
+			TableFuncElementList				{ $$ = $1; }
+			| /*EMPTY*/							{ $$ = NIL; }
+		;
+
+TableFuncElementList:
+			TableFuncElement
+				{
+					$$ = [$1];
+				}
+			| TableFuncElementList ',' TableFuncElement
+				{
+					$$ = $1; $1.push($3);
+				}
+		;
+
+TableFuncElement:	ColId Typename opt_collate_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_ColumnDef,
+						colname: $1,
+						typeName: $2,
+						inhcount: 0,
+						is_local: true,
+						is_not_null: false,
+						is_from_type: false,
+						storage: 0,
+						raw_default: NULL,
+						cooked_default: NULL,
+						collClause: /* (CollateClause *) */ $3,
+						collOid: -1,
+						constraints: NIL,
+						location: @1
+					}
+				}
 		;
 
 columnref:	ColId
@@ -2538,4 +2774,63 @@ sort_clause:
 sortby_list:
 			sortby									{ $$ = [$1]; }
 			| sortby_list ',' sortby				{ $1.push($3); $$ = $1; }
+		;
+
+
+select_limit:
+			limit_clause offset_clause			{ $$ = [$2, $1]; }
+			| offset_clause limit_clause		{ $$ = [$1, $2]; }
+			| limit_clause						{ $$ = [NULL, $1]; }
+			| offset_clause						{ $$ = [$1, NULL]; }
+		;
+
+opt_select_limit:
+			select_limit						{ $$ = $1; }
+			| /* EMPTY */						{ $$ = [NULL,NULL]; }
+		;
+
+limit_clause:
+			LIMIT select_limit_value
+				{ $$ = $2; }
+			| LIMIT select_limit_value ',' select_offset_value
+				{
+					/* Disabled because it was too confusing, bjm 2002-02-18 */
+					ereport(ERROR,
+							(errcode(ERRCODE_SYNTAX_ERROR),
+							 errmsg("LIMIT #,# syntax is not supported"),
+							 errhint("Use separate LIMIT and OFFSET clauses."),
+							 parser_errposition(@1)));
+				}
+			/* SQL:2008 syntax */
+			/* to avoid shift/reduce conflicts, handle the optional value with
+			 * a separate production rather than an opt_ expression.  The fact
+			 * that ONLY is fully reserved means that this way, we defer any
+			 * decision about what rule reduces ROW or ROWS to the point where
+			 * we can see the ONLY token in the lookahead slot.
+			 */
+			| FETCH first_or_next select_fetch_first_value row_or_rows ONLY
+				{ $$ = $3; }
+			| FETCH first_or_next row_or_rows ONLY
+				{ $$ = _.makeIntConst(1, -1); }
+		;
+
+offset_clause:
+			OFFSET select_offset_value
+				{ $$ = $2; }
+			/* SQL:2008 syntax */
+			| OFFSET select_fetch_first_value row_or_rows
+				{ $$ = $2; }
+		;
+
+select_limit_value:
+			a_expr									{ $$ = $1; }
+			| ALL
+				{
+					/* LIMIT ALL is represented as a NULL constant */
+					$$ = _.makeNullAConst(@1);
+				}
+		;
+
+select_offset_value:
+			a_expr									{ $$ = $1; }
 		;

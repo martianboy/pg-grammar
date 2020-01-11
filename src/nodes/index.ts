@@ -6,3 +6,4 @@ export * from './makefuncs';
 export * from './nodefuncs';
 export * from './consts';
 export * from './lockoptions';
+export * from './lockdefs';
