@@ -1,7 +1,23 @@
 import { makeString, Value } from "./value";
 import { NodeTag } from './tags';
 import { Node, OnConflictAction } from './node';
-import { IntoClause, Expr, RangeVar } from "./primnodes";
+import { IntoClause, Expr, RangeVar, Alias, Oid } from "./primnodes";
+
+/* Sort ordering options for ORDER BY and CREATE INDEX */
+export enum SortByDir
+{
+	SORTBY_DEFAULT,
+	SORTBY_ASC,
+	SORTBY_DESC,
+	SORTBY_USING				/* not allowed in CREATE INDEX ... */
+}
+
+export enum SortByNulls
+{
+	SORTBY_NULLS_DEFAULT,
+	SORTBY_NULLS_FIRST,
+	SORTBY_NULLS_LAST
+}
 
 export interface ColumnRef extends Node<NodeTag.T_ColumnRef> {
   fields: any[];
@@ -69,9 +85,9 @@ export interface TypeName extends Node<NodeTag.T_TypeName> {
 	// Oid			typeOid;		/* type identified by OID */
 	setof?: boolean;			/* is a set? */
 	pct_type?: boolean;		/* %TYPE specified? */
-	typmods: Node<any>[];		/* type modifier expression(s) */
+	typmods: unknown[];		/* type modifier expression(s) */
 	typemod: number;		/* prespecified type modifier */
-	arrayBounds?: Node<any>[];	/* array bounds */
+	arrayBounds?: unknown[];	/* array bounds */
 	location: number;		/* token location, or -1 if unknown */
 };
 
@@ -89,10 +105,38 @@ export interface TypeCast<T extends NodeTag = any> extends Node<NodeTag.T_TypeCa
  */
 export interface CollateClause extends Node<NodeTag.T_CollateClause>
 {
-	arg: Node<any>;			/* input expression */
+	arg: unknown;			/* input expression */
 	collname: Value<NodeTag.T_String>;		/* possibly-qualified collation name */
 	location: number;		/* token location, or -1 if unknown */
 };
+
+/*
+ * FuncCall - a function or aggregate invocation
+ *
+ * agg_order (if not NIL) indicates we saw 'foo(... ORDER BY ...)', or if
+ * agg_within_group is true, it was 'foo(...) WITHIN GROUP (ORDER BY ...)'.
+ * agg_star indicates we saw a 'foo(*)' construct, while agg_distinct
+ * indicates we saw 'foo(DISTINCT ...)'.  In any of these cases, the
+ * construct *must* be an aggregate call.  Otherwise, it might be either an
+ * aggregate or some other kind of function.  However, if FILTER or OVER is
+ * present it had better be an aggregate or window function.
+ *
+ * Normally, you'd initialize this via makeFuncCall() and then only change the
+ * parts of the struct its defaults don't match afterwards, as needed.
+ */
+export interface FuncCall extends Node<NodeTag.T_FuncCall>
+{
+	funcname: Value<NodeTag.T_String>[];		/* qualified name of function */
+	args: Expr[];				/* the arguments (list of exprs) */
+	agg_order: SortBy[] | null;	/* ORDER BY (list of SortBy) */
+	agg_filter: unknown | null;	/* FILTER clause, if any */
+	agg_within_group: boolean;	/* ORDER BY appeared in WITHIN GROUP */
+	agg_star: boolean;			/* argument was really '*' */
+	agg_distinct: boolean;		/* arguments were labeled DISTINCT */
+	func_variadic: boolean;		/* last argument was labeled VARIADIC */
+	over: WindowDef | null;		/* OVER clause, if any */
+	location: number;			/* token location, or -1 if unknown */
+}
 
 /*
  * A_Star - '*' representing all columns of a table or compound field
@@ -113,8 +157,8 @@ export interface A_Star extends Node<NodeTag.T_A_Star>
 export interface A_Indices extends Node<NodeTag.T_A_Indices>
 {
 	is_slice: boolean;		/* true if slice (i.e., colon present) */
-	lidx: Node<any>;			/* slice lower bound, if any */
-	uidx: Node<any>;			/* subscript, or slice upper bound if any */
+	lidx: unknown;			/* slice lower bound, if any */
+	uidx: unknown;			/* subscript, or slice upper bound if any */
 }
 
 /*
@@ -134,16 +178,21 @@ export interface A_Indices extends Node<NodeTag.T_A_Indices>
  */
 export interface A_Indirection extends Node<NodeTag.T_A_Indirection>
 {
-	arg: Node<any>;			        /* the thing being selected from */
-	indirection: unknown[];	/* subscripts and/or field names and/or * */
+	arg: unknown;		      /* the thing being selected from */
+	indirection: unknown[];	  /* subscripts and/or field names and/or * */
 }
+
+export type Indirection =
+	| Value<NodeTag.T_String>
+	| A_Star
+	| A_Indices;
 
 /*
  * A_ArrayExpr - an ARRAY[] construct
  */
-export interface A_ArrayExpr extends Node<NodeTag.T_ArrayExpr>
+export interface A_ArrayExpr extends Node<NodeTag.T_A_ArrayExpr>
 {
-	elements: Node<any>[];		/* array element expressions */
+	elements: unknown[];		/* array element expressions */
 	location: number;		      /* token location, or -1 if unknown */
 }
 
@@ -171,6 +220,18 @@ export interface ResTarget extends Node<NodeTag.T_ResTarget>
 	indirection: A_Indirection[] | null;	/* subscripts, field names, and '*', or NIL */
 	val: Expr;			/* the value expression to compute or assign */
 	location: number;		/* token location, or -1 if unknown */
+}
+
+/*
+ * SortBy - for ORDER BY clause
+ */
+export interface SortBy extends Node<NodeTag.T_SortBy>
+{
+	node: A_Expr;			/* expression to sort on */
+	sortby_dir: SortByDir;		/* ASC/DESC/USING/default */
+	sortby_nulls: SortByNulls;	/* NULLS FIRST/LAST */
+	useOp: unknown[];			/* name of op to use, if SORTBY_USING */
+	location: number;		/* operator location, or -1 if none/unknown */
 }
 
 /*
@@ -231,6 +292,172 @@ export const FRAMEOPTION_DEFAULTS =
 	(FRAMEOPTION_RANGE | FRAMEOPTION_START_UNBOUNDED_PRECEDING |
 	 FRAMEOPTION_END_CURRENT_ROW)
 
+
+/*
+ * RangeSubselect - subquery appearing in a FROM clause
+ */
+export interface RangeSubselect extends Node<NodeTag.T_RangeSubselect>
+{
+	lateral: boolean;		/* does it have LATERAL prefix? */
+	subquery: unknown;		/* the untransformed sub-select clause */
+	alias: Alias;			/* table alias & optional column aliases */
+}
+
+/*
+ * RangeFunction - function call appearing in a FROM clause
+ *
+ * functions is a List because we use this to represent the construct
+ * ROWS FROM(func1(...), func2(...), ...).  Each element of this list is a
+ * two-element sublist, the first element being the untransformed function
+ * call tree, and the second element being a possibly-empty list of ColumnDef
+ * nodes representing any columndef list attached to that function within the
+ * ROWS FROM() syntax.
+ *
+ * alias and coldeflist represent any alias and/or columndef list attached
+ * at the top level.  (We disallow coldeflist appearing both here and
+ * per-function, but that's checked in parse analysis, not by the grammar.)
+ */
+export interface RangeFunction extends Node<NodeTag.T_RangeFunction>
+{
+	lateral: boolean;		/* does it have LATERAL prefix? */
+	ordinality: boolean;		/* does it have WITH ORDINALITY suffix? */
+	is_rowsfrom: boolean;	/* is result of ROWS FROM() syntax? */
+	functions: unknown[];		/* per-function information, see above */
+	alias: Alias;			/* table alias & optional column aliases */
+	coldeflist: unknown[];		/* list of ColumnDef nodes to describe result
+								 * of function returning RECORD */
+}
+
+/*
+ * RangeTableFunc - raw form of "table functions" such as XMLTABLE
+ */
+export interface RangeTableFunc extends Node<NodeTag.T_RangeTableFunc>
+{
+	lateral: boolean;		/* does it have LATERAL prefix? */
+	docexpr: unknown; 		/* document expression */
+	rowexpr: unknown; 		/* row generator expression */
+	namespaces: unknown[];	/* list of namespaces as ResTarget */
+	columns: unknown[];		/* list of RangeTableFuncCol */
+	alias: Alias; 			/* table alias & optional column aliases */
+	location: number; 		/* token location, or -1 if unknown */
+}
+
+/*
+ * RangeTableFuncCol - one column in a RangeTableFunc->columns
+ *
+ * If for_ordinality is true (FOR ORDINALITY), then the column is an int4
+ * column and the rest of the fields are ignored.
+ */
+export interface RangeTableFuncCol extends Node<NodeTag.T_RangeTableFuncCol>
+{
+	colname: string;			/* name of generated column */
+	typeName: TypeName;			/* type of generated column */
+	for_ordinality: boolean;	/* does it have FOR ORDINALITY? */
+	is_not_null: boolean;		/* does it have NOT NULL? */
+	colexpr: unknown;			/* column filter expression */
+	coldefexpr: unknown;		/* column default value expression */
+	location: number;			/* token location, or -1 if unknown */
+}
+
+/*
+ * RangeTableSample - TABLESAMPLE appearing in a raw FROM clause
+ *
+ * This node, appearing only in raw parse trees, represents
+ *		<relation> TABLESAMPLE <method> (<params>) REPEATABLE (<num>)
+ * Currently, the <relation> can only be a RangeVar, but we might in future
+ * allow RangeSubselect and other options.  Note that the RangeTableSample
+ * is wrapped around the node representing the <relation>, rather than being
+ * a subfield of it.
+ */
+export interface RangeTableSample extends Node<NodeTag.T_RangeTableSample>
+{
+	relation: unknown;		/* relation to be sampled */
+	method: unknown[];			/* sampling method name (possibly qualified) */
+	args: unknown[];			/* argument(s) for sampling method */
+	repeatable: unknown;		/* REPEATABLE expression, or NULL if none */
+	location: number;		/* method name location, or -1 if unknown */
+}
+
+/*
+ * ColumnDef - column definition (used in various creates)
+ *
+ * If the column has a default value, we may have the value expression
+ * in either "raw" form (an untransformed parse tree) or "cooked" form
+ * (a post-parse-analysis, executable expression tree), depending on
+ * how this ColumnDef node was created (by parsing, or by inheritance
+ * from an existing relation).  We should never have both in the same node!
+ *
+ * Similarly, we may have a COLLATE specification in either raw form
+ * (represented as a CollateClause with arg==NULL) or cooked form
+ * (the collation's OID).
+ *
+ * The constraints list may contain a CONSTR_DEFAULT item in a raw
+ * parsetree produced by gram.y, but transformCreateStmt will remove
+ * the item and set raw_default instead.  CONSTR_DEFAULT items
+ * should not appear in any subsequent processing.
+ */
+export interface ColumnDef extends Node<NodeTag.T_ColumnDef>
+{
+	colname: string	  ;		/* name of column */
+	typeName: TypeName  ;		/* type of column */
+	inhcount: number;		/* number of times column is inherited */
+	is_local: boolean;		/* column has local (non-inherited) def'n */
+	is_not_null: boolean;	/* NOT NULL constraint specified? */
+	is_from_type: boolean;	/* column definition came from table type */
+	storage: string;		/* attstorage setting, or 0 for default */
+	raw_default: unknown	  ;	/* default value (untransformed parse tree) */
+	cooked_default: unknown	  ; /* default value (transformed expr tree) */
+	identity: string;		/* attidentity setting */
+	identitySequence: RangeVar  ;	/* to store identity sequence name for
+									 * ALTER TABLE ... ADD COLUMN */
+	generated: string;		/* attgenerated setting */
+	collClause: CollateClause;	/* untransformed COLLATE spec, if any */
+	collOid: Oid;		/* collation OID (InvalidOid if not set) */
+	constraints: unknown[]	  ;	/* other constraints on column */
+	fdwoptions: unknown[]	  ;		/* per-column FDW options */
+	location: number;		/* parse location, or -1 if none/unknown */
+}
+
+/*
+ * TableLikeClause - CREATE TABLE ( ... LIKE ... ) clause
+ */
+export interface TableLikeClause extends Node<NodeTag.T_TableLikeClause>
+{
+	relation: RangeVar;
+	options: number;		/* OR of TableLikeOption flags */
+}
+
+export enum TableLikeOption
+{
+	CREATE_TABLE_LIKE_COMMENTS = 1 << 0,
+	CREATE_TABLE_LIKE_CONSTRAINTS = 1 << 1,
+	CREATE_TABLE_LIKE_DEFAULTS = 1 << 2,
+	CREATE_TABLE_LIKE_GENERATED = 1 << 3,
+	CREATE_TABLE_LIKE_IDENTITY = 1 << 4,
+	CREATE_TABLE_LIKE_INDEXES = 1 << 5,
+	CREATE_TABLE_LIKE_STATISTICS = 1 << 6,
+	CREATE_TABLE_LIKE_STORAGE = 1 << 7,
+	CREATE_TABLE_LIKE_ALL = Number.MAX_SAFE_INTEGER
+}
+
+/*
+ * IndexElem - index parameters (used in CREATE INDEX, and in ON CONFLICT)
+ *
+ * For a plain index attribute, 'name' is the name of the table column to
+ * index, and 'expr' is NULL.  For an index expression, 'name' is NULL and
+ * 'expr' is the expression tree.
+ */
+export interface IndexElem extends Node<NodeTag.T_IndexElem>
+{
+	name: string	   ;			/* name of attribute to index, or NULL */
+	expr: unknown	   ;			/* expression to index, or NULL */
+	indexcolname: string	   ;	/* name for index column; NULL = default */
+	collation: unknown[]	   ;		/* name of collation; NIL = default */
+	opclass: unknown[]	   ;		/* name of desired opclass; NIL = default */
+	ordering: SortByDir;		/* ASC/DESC/default */
+	nulls_ordering: SortByNulls; /* FIRST/LAST/default */
+}
+
 /*
  * WithClause -
  *	   representation of WITH clause
@@ -257,7 +484,7 @@ export interface InferClause extends Node<NodeTag.T_InferClause>
 	whereClause: A_Expr;	/* qualification (partial-index predicate) */
 	conname: string;		/* Constraint name, or NULL if unnamed */
 	location: number;		/* token location, or -1 if unknown */
-};
+}
 
 /*
  * OnConflictClause -

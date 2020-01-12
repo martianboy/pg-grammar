@@ -1,7 +1,7 @@
-import { Node, IsA } from './node';
-import { RangeVar, Var, Index, AttrNumber, Oid, BoolExpr, BoolExprType, FromExpr, Const, Alias, Expr } from "./primnodes";
+import { Node } from './node';
+import { RangeVar, Var, Index, AttrNumber, Oid, BoolExpr, BoolExprType, FromExpr, Const, Alias, Expr, SQLValueFunctionOp, XmlExpr, XmlExprOp } from "./primnodes";
 import { NodeTag } from "./tags";
-import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation } from "./parsenodes";
+import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation, FuncCall, A_ArrayExpr } from "./parsenodes";
 import { makeString, Value } from "./value";
 import { BoolGetDatum } from './datum';
 import { BOOLOID } from '../common/pg_type_d';
@@ -253,19 +253,26 @@ export function SystemTypeName(name: string): TypeName
 	return makeTypeNameFromNameList([makeString("pg_catalog"), makeString(name)]);
 }
 
+/* SystemFuncName()
+ * Build a properly-qualified reference to a built-in function.
+ */
+export function SystemFuncName(name: string)
+{
+	return [makeString("pg_catalog"), makeString(name)];
+}
 
-export function makeAndExpr(lexpr: Node<any> | null, rexpr: Node<any>, location: number)
+export function makeAndExpr(lexpr: Expr | null, rexpr: Expr, location: number)
 {
 	let lexp = lexpr;
 
 	/* Look through AEXPR_PAREN nodes so they don't affect flattening */
-	while (IsA(lexp, 'A_Expr') &&
-		   ((lexp as A_Expr).kind == A_Expr_Kind.AEXPR_PAREN))
-		lexp = (lexp as A_Expr).lexpr;
+	while (lexp?.type === NodeTag.T_A_Expr &&
+		   (lexp.kind == A_Expr_Kind.AEXPR_PAREN))
+		lexp = lexp.lexpr;
 	/* Flatten "a AND b AND c ..." to a single BoolExpr on sight */
-	if (IsA(lexp, 'BoolExpr'))
+	if (lexp?.type === NodeTag.T_BoolExpr)
 	{
-		let blexpr: BoolExpr = lexp as BoolExpr;
+		let blexpr = lexp;
 
 		if (blexpr.boolop == BoolExprType.AND_EXPR)
 		{
@@ -276,18 +283,18 @@ export function makeAndExpr(lexpr: Node<any> | null, rexpr: Node<any>, location:
 	return makeBoolExpr(BoolExprType.AND_EXPR, [lexpr, rexpr], location);
 }
 
-export function makeOrExpr(lexpr: Node<any> | null, rexpr: Node<any> | null, location: number)
+export function makeOrExpr(lexpr: Expr | null, rexpr: Expr | null, location: number)
 {
 	let lexp = lexpr;
 
 	/* Look through AEXPR_PAREN nodes so they don't affect flattening */
-	while (IsA(lexp, 'A_Expr') &&
-		   ((lexp as A_Expr).kind == A_Expr_Kind.AEXPR_PAREN))
-		lexp = (lexp as A_Expr).lexpr;
+	while (lexp?.type === NodeTag.T_A_Expr &&
+			(lexp.kind == A_Expr_Kind.AEXPR_PAREN))
+		lexp = lexp.lexpr;
 	/* Flatten "a AND b AND c ..." to a single BoolExpr on sight */
-	if (IsA(lexp, 'BoolExpr'))
+	if (lexp?.type === NodeTag.T_BoolExpr)
 	{
-		let blexpr: BoolExpr = lexp as BoolExpr;
+		let blexpr = lexp;
 
 		if (blexpr.boolop == BoolExprType.OR_EXPR)
 		{
@@ -327,3 +334,89 @@ export function makeSetOp(op: SetOperation, all: boolean, larg: SelectStmt, rarg
 		rarg
 	};
 }
+
+
+/*
+ * makeFuncCall -
+ *
+ * Initialize a FuncCall struct with the information every caller must
+ * supply.  Any non-default parameters have to be inserted by the caller.
+ */
+export function makeFuncCall(name: Value<NodeTag.T_String>[], args: Expr[], location: number): FuncCall
+{
+	return {
+		type: NodeTag.T_FuncCall,
+		funcname: name,
+		args,
+		agg_order: null,
+		agg_filter: null,
+		agg_within_group: false,
+		agg_star: false,
+		agg_distinct: false,
+		func_variadic: false,
+		over: null,
+		location: location,
+	}
+}
+
+
+export function makeAArrayExpr(elements: unknown[], location: number): A_ArrayExpr
+{
+	return {
+		type: NodeTag.T_A_ArrayExpr,
+		elements,
+		location,
+	};
+}
+
+export function makeSQLValueFunction(op: SQLValueFunctionOp, typmod: number, location: number)
+{
+	return {
+		type: NodeTag.T_SQLValueFunction,
+		op,
+		/* svf->type will be filled during parse analysis */
+		typmod,
+		location
+	};
+}
+
+export function makeXmlExpr(op: XmlExprOp, name: string, named_args: unknown[], args: unknown[],
+			location: number): XmlExpr
+{
+	return {
+		type: NodeTag.T_XmlExpr,
+		op,
+		name,
+		/*
+		 * named_args is a list of ResTarget; it'll be split apart into separate
+		 * expression and name lists in transformXmlExpr().
+		 */
+		named_args,
+		/* xmloption, if relevant, must be filled in by caller */
+		arg_names: null,
+		args,
+		location
+	};
+}
+
+/*
+ * Merge the input and output parameters of a table function.
+ */
+// static List *
+// mergeTableFuncParameters(List *func_args, List *columns)
+// {
+// 	ListCell   *lc;
+
+// 	/* Explicit OUT and INOUT parameters shouldn't be used in this syntax */
+// 	foreach(lc, func_args)
+// 	{
+// 		FunctionParameter *p = (FunctionParameter *) lfirst(lc);
+
+// 		if (p->mode != FUNC_PARAM_IN && p->mode != FUNC_PARAM_VARIADIC)
+// 			ereport(ERROR,
+// 					(errcode(ERRCODE_SYNTAX_ERROR),
+// 					 errmsg("OUT and INOUT arguments aren't allowed in TABLE functions")));
+// 	}
+
+// 	return list_concat(func_args, columns);
+// }

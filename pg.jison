@@ -701,7 +701,7 @@ select_no_parens:
 
 select_clause:
 			simple_select						{ $$ = $1; }
-			| select_with_parens					{ $$ = $1; }
+			| select_with_parens				{ $$ = $1; }
 		;
 
 /*
@@ -1033,12 +1033,12 @@ values_clause:
 
 LockStmt:	LOCK_P opt_table relation_expr_list opt_lock opt_nowait
 				{
-					LockStmt *n = makeNode(LockStmt);
-
-					n->relations = $3;
-					n->mode = $4;
-					n->nowait = $5;
-					$$ = (Node *)n;
+					$$ = {
+						type: _.NodeTag.T_LockStmt,
+						relations: $3,
+						mode: $4,
+						nowait: $5
+					};
 				}
 		;
 
@@ -1387,14 +1387,18 @@ func_alias_clause:
 				}
 			| AS ColId '(' TableFuncElementList ')'
 				{
-					Alias *a = makeNode(Alias);
-					a->aliasname = $2;
+					var a = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $2
+					};
 					$$ = [a, $4];
 				}
 			| ColId '(' TableFuncElementList ')'
 				{
-					Alias *a = makeNode(Alias);
-					a->aliasname = $1;
+					var a = {
+						type: _.NodeTag.T_Alias,
+						aliasname: $1
+					};
 					$$ = [a, $3];
 				}
 			| /*EMPTY*/
@@ -1878,6 +1882,126 @@ TableFuncElement:	ColId Typename opt_collate_clause
 				}
 		;
 
+
+/*****************************************************************************
+ *
+ *	Type syntax
+ *		SQL introduces a large amount of type-specific syntax.
+ *		Define individual clauses to handle these cases, and use
+ *		 the generic case to handle regular type-extensible Postgres syntax.
+ *		- thomas 1997-10-10
+ *
+ *****************************************************************************/
+
+Typename:	SimpleTypename opt_array_bounds
+				{
+					$$ = $1;
+					$$.arrayBounds = $2;
+				}
+			| SETOF SimpleTypename opt_array_bounds
+				{
+					$$ = $2;
+					$$.arrayBounds = $3;
+					$$.setof = true;
+				}
+			/* SQL standard syntax, currently only one-dimensional */
+			| SimpleTypename ARRAY '[' Iconst ']'
+				{
+					$$ = $1;
+					$$.arrayBounds = [_.makeInteger($4)];
+				}
+			| SETOF SimpleTypename ARRAY '[' Iconst ']'
+				{
+					$$ = $2;
+					$$.arrayBounds = [_.makeInteger($5)];
+					$$.setof = true;
+				}
+			| SimpleTypename ARRAY
+				{
+					$$ = $1;
+					$$.arrayBounds = [_.makeInteger(-1)];
+				}
+			| SETOF SimpleTypename ARRAY
+				{
+					$$ = $2;
+					$$.arrayBounds = [_.makeInteger(-1)];
+					$$.setof = true;
+				}
+		;
+
+opt_array_bounds:
+			opt_array_bounds '[' ']'
+					{  $$ = $1; $1.push(_.makeInteger(-1)); }
+			| opt_array_bounds '[' Iconst ']'
+					{  $$ = $1; $1.push(_.makeInteger($3)); }
+			| /*EMPTY*/
+					{  $$ = NIL; }
+		;
+
+SimpleTypename:
+			GenericType								{ $$ = $1; }
+			| Numeric								{ $$ = $1; }
+			| Bit									{ $$ = $1; }
+			| Character								{ $$ = $1; }
+			| ConstDatetime							{ $$ = $1; }
+			| ConstInterval opt_interval
+				{
+					$$ = $1;
+					$$.typmods = $2;
+				}
+			| ConstInterval '(' Iconst ')'
+				{
+					$$ = $1;
+					$$.typmods = [_.makeIntConst(_.INTERVAL_FULL_RANGE, -1),
+											 _.makeIntConst($3, @3)];
+				}
+		;
+
+/* We have a separate ConstTypename to allow defaulting fixed-length
+ * types such as CHAR() and BIT() to an unspecified length.
+ * SQL9x requires that these default to a length of one, but this
+ * makes no sense for constructs like CHAR 'hi' and BIT '0101',
+ * where there is an obvious better choice to make.
+ * Note that ConstInterval is not included here since it must
+ * be pushed up higher in the rules to accommodate the postfix
+ * options (e.g. INTERVAL '1' YEAR). Likewise, we have to handle
+ * the generic-type-name case in AexprConst to avoid premature
+ * reduce/reduce conflicts against function names.
+ */
+ConstTypename:
+			Numeric									{ $$ = $1; }
+			| ConstBit								{ $$ = $1; }
+			| ConstCharacter						{ $$ = $1; }
+			| ConstDatetime							{ $$ = $1; }
+		;
+
+/*
+ * GenericType covers all type names that don't have special syntax mandated
+ * by the standard, including qualified names.  We also allow type modifiers.
+ * To avoid parsing conflicts against function invocations, the modifiers
+ * have to be shown as expr_list here, but parse analysis will only accept
+ * constants for them.
+ */
+GenericType:
+			type_function_name opt_type_modifiers
+				{
+					$$ = _.makeTypeName($1);
+					$$.typmods = $2;
+					$$.location = @1;
+				}
+			| type_function_name attrs opt_type_modifiers
+				{
+					$2.unshift(_.makeString($1))
+					$$ = _.makeTypeNameFromNameList($2);
+					$$.typmods = $3;
+					$$.location = @1;
+				}
+		;
+
+opt_type_modifiers: '(' expr_list ')'				{ $$ = $2; }
+					| /* EMPTY */					{ $$ = NIL; }
+		;
+
 columnref:	ColId
 				{
 					$$ = _.makeColumnRef($1, null, @1, null /* yyscanner */);
@@ -1899,7 +2023,7 @@ indirection_el:
 				}
 			| '[' a_expr ']'
 				{
-					const ai = _.makeNode('A_Indices');
+					var ai = _.makeNode('A_Indices');
 					ai.is_slice = false;
 					ai.lidx = null;
 					ai.uidx = $2;
@@ -1907,7 +2031,7 @@ indirection_el:
 				}
 			| '[' opt_slice_bound ':' opt_slice_bound ']'
 				{
-					ai = _.makeNode('A_Indices');
+					var ai = _.makeNode('A_Indices');
 					ai.is_slice = true;
 					ai.lidx = $2;
 					ai.uidx = $4;
@@ -2140,7 +2264,582 @@ expr_list:	a_expr
  */
 c_expr:		columnref								{ $$ = $1; }
 			| AexprConst							{ $$ = $1; }
+			| PARAM opt_indirection
+				{
+					var p = {
+						type: _.NodeTag.T_ParamRef,
+						number: $1,
+						location: @1
+					};
+
+					if ($2)
+					{
+						$$ = {
+							type: _.NodeTag.T_A_Indirection,
+							arg: p,
+							indirection: _.check_indirection($2, yyscanner),
+						};
+					}
+					else
+						$$ = p;
+				}
+			| '(' a_expr ')' opt_indirection
+				{
+					if ($4)
+					{
+						$$ = {
+							type: _.NodeTag.T_A_Indirection,
+							arg: $2,
+							indirection: _.check_indirection($4, yyscanner),
+						};
+					}
+					else if (operator_precedence_warning)
+					{
+						/*
+						 * If precedence warnings are enabled, insert
+						 * AEXPR_PAREN nodes wrapping all explicitly
+						 * parenthesized subexpressions; this prevents bogus
+						 * warnings from being issued when the ordering has
+						 * been forced by parentheses.  Take care that an
+						 * AEXPR_PAREN node has the same exprLocation as its
+						 * child, so as not to cause surprising changes in
+						 * error cursor positioning.
+						 *
+						 * In principle we should not be relying on a GUC to
+						 * decide whether to insert AEXPR_PAREN nodes.
+						 * However, since they have no effect except to
+						 * suppress warnings, it's probably safe enough; and
+						 * we'd just as soon not waste cycles on dummy parse
+						 * nodes if we don't have to.
+						 */
+						$$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_PAREN, NIL, $2, NULL,
+												 _.exprLocation($2));
+					}
+					else
+						$$ = $2;
+				}
+			| case_expr
+				{ $$ = $1; }
+			| func_expr
+				{ $$ = $1; }
+			| select_with_parens			%prec UMINUS
+				{
+					$$ = {
+						type: _.NodeTag.SubLink,
+						subLinkType: _.SubLinkType.EXPR_SUBLINK,
+						subLinkId: 0,
+						testexpr: NULL,
+						operName: NIL,
+						subselect: $1,
+						location: @1
+					};
+				}
+			| select_with_parens indirection
+				{
+					/*
+					 * Because the select_with_parens nonterminal is designed
+					 * to "eat" as many levels of parens as possible, the
+					 * '(' a_expr ')' opt_indirection production above will
+					 * fail to match a sub-SELECT with indirection decoration;
+					 * the sub-SELECT won't be regarded as an a_expr as long
+					 * as there are parens around it.  To support applying
+					 * subscripting or field selection to a sub-SELECT result,
+					 * we need this redundant-looking production.
+					 */
+					var n = {
+						type: _.NodeTag.SubLink,
+						subLinkType: _.SubLinkType.EXPR_SUBLINK,
+						subLinkId: 0,
+						testexpr: NULL,
+						operName: NIL,
+						subselect: $1,
+						location: @1,
+					};
+
+					$$ = {
+						type: _.NodeTag.A_Indirection,
+						arg: n,
+						indirection: _.check_indirection($2, yyscanner),
+					};
+				}
+			| EXISTS select_with_parens
+				{
+					$$ = {
+						type: _.NodeTag.T_SubLink,
+						subLinkType: _.SubLinkType.EXISTS_SUBLINK,
+						subLinkId: 0,
+						testexpr: NULL,
+						operName: NIL,
+						subselect: $2,
+						location: @1,
+					};
+				}
+			| ARRAY select_with_parens
+				{
+					$$ = {
+						type: _.NodeTag.T_SubLink,
+						subLinkType: ARRAY_SUBLINK,
+						subLinkId: 0,
+						testexpr: NULL,
+						operName: NIL,
+						subselect: $2,
+						location: @1,
+					};
+				}
+			| ARRAY array_expr
+				{
+					$$ = $2;
+					/* point outermost A_ArrayExpr to the ARRAY keyword */
+					$$.location = @1;
+				}
+			| explicit_row
+				{
+					$$ = {
+						type: _.NodeTag.T_RowExpr,
+						args: $1,
+						row_typeid: -1,	/* not analyzed yet */
+						colnames: NIL,	/* to be filled in during analysis */
+						row_format: _.CoercionForm.COERCE_EXPLICIT_CALL, /* abuse */
+						location: @1,
+					};
+				}
+			| implicit_row
+				{
+					$$ = {
+						type: _.NodeTag.T_RowExpr,
+						args: $1,
+						row_typeid: -1,	/* not analyzed yet */
+						colnames: NIL,	/* to be filled in during analysis */
+						row_format: _.CoercionForm.COERCE_IMPLICIT_CAST, /* abuse */
+						location: @1
+					};
+				}
+			| GROUPING '(' expr_list ')'
+			  	{
+					$$ = {
+					  	type: _.NodeTag.T_GroupingFunc,
+						args: $3,
+						location: @1
+					};
+			  	}
 		;
+
+func_application: func_name '(' ')'
+				{
+					$$ = _.makeFuncCall($1, NIL, @1);
+				}
+			| func_name '(' func_arg_list opt_sort_clause ')'
+				{
+					$$ = _.makeFuncCall($1, $3, @1);
+					$$.agg_order = $4;
+				}
+			| func_name '(' VARIADIC func_arg_expr opt_sort_clause ')'
+				{
+					$$ = _.makeFuncCall($1, [$4], @1);
+					$$.func_variadic = true;
+					$$.agg_order = $5;
+				}
+			| func_name '(' func_arg_list ',' VARIADIC func_arg_expr opt_sort_clause ')'
+				{
+					$$ = _.makeFuncCall($1, [...$3, $6], @1);
+					$$.func_variadic = true;
+					$$.agg_order = $7;
+				}
+			| func_name '(' ALL func_arg_list opt_sort_clause ')'
+				{
+					/* Ideally we'd mark the FuncCall node to indicate
+					 * "must be an aggregate", but there's no provision
+					 * for that in FuncCall at the moment.
+					 */
+					$$ = _.makeFuncCall($1, $4, @1);
+					$$.agg_order = $5;
+				}
+			| func_name '(' DISTINCT func_arg_list opt_sort_clause ')'
+				{
+					$$ = _.makeFuncCall($1, $4, @1);
+					$$.agg_order = $5;
+					$$.agg_distinct = true;
+				}
+			| func_name '(' '*' ')'
+				{
+					/*
+					 * We consider AGGREGATE(*) to invoke a parameterless
+					 * aggregate.  This does the right thing for COUNT(*),
+					 * and there are no other aggregates in SQL that accept
+					 * '*' as parameter.
+					 *
+					 * The FuncCall node is also marked agg_star = true,
+					 * so that later processing can detect what the argument
+					 * really was.
+					 */
+					$$ = _.makeFuncCall($1, NIL, @1);
+					$$.agg_star = true;
+				}
+		;
+
+
+/*
+ * func_expr and its cousin func_expr_windowless are split out from c_expr just
+ * so that we have classifications for "everything that is a function call or
+ * looks like one".  This isn't very important, but it saves us having to
+ * document which variants are legal in places like "FROM function()" or the
+ * backwards-compatible functional-index syntax for CREATE INDEX.
+ * (Note that many of the special SQL functions wouldn't actually make any
+ * sense as functional index entries, but we ignore that consideration here.)
+ */
+func_expr: func_application within_group_clause filter_clause over_clause
+				{
+					/** @type {FuncCall} */
+					var n = $1;
+
+					/*
+					 * The order clause for WITHIN GROUP and the one for
+					 * plain-aggregate ORDER BY share a field, so we have to
+					 * check here that at most one is present.  We also check
+					 * for DISTINCT and VARIADIC here to give a better error
+					 * location.  Other consistency checks are deferred to
+					 * parse analysis.
+					 */
+					if ($2 != NIL)
+					{
+						if (n.agg_order != NIL)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("cannot use multiple ORDER BY clauses with WITHIN GROUP"),
+									 parser_errposition(@2)));
+						if (n.agg_distinct)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("cannot use DISTINCT with WITHIN GROUP"),
+									 parser_errposition(@2)));
+						if (n.func_variadic)
+							ereport(ERROR,
+									(errcode(ERRCODE_SYNTAX_ERROR),
+									 errmsg("cannot use VARIADIC with WITHIN GROUP"),
+									 parser_errposition(@2)));
+						n.agg_order = $2;
+						n.agg_within_group = true;
+					}
+					n.agg_filter = $3;
+					n.over = $4;
+					$$ = n;
+				}
+			| func_expr_common_subexpr
+				{ $$ = $1; }
+		;
+
+/*
+ * As func_expr but does not accept WINDOW functions directly
+ * (but they can still be contained in arguments for functions etc).
+ * Use this when window expressions are not allowed, where needed to
+ * disambiguate the grammar (e.g. in CREATE INDEX).
+ */
+func_expr_windowless:
+			func_application						{ $$ = $1; }
+			| func_expr_common_subexpr				{ $$ = $1; }
+		;
+
+/*
+ * Special expressions that are considered to be functions.
+ */
+func_expr_common_subexpr:
+			COLLATION FOR '(' a_expr ')'
+				{
+					$$ = _.makeFuncCall(_.SystemFuncName("pg_collation_for"),
+											   [$4],
+											   @1);
+				}
+			| CURRENT_DATE
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_DATE, -1, @1);
+				}
+			| CURRENT_TIME
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIME, -1, @1);
+				}
+			| CURRENT_TIME '(' Iconst ')'
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIME_N, $3, @1);
+				}
+			| CURRENT_TIMESTAMP
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIMESTAMP, -1, @1);
+				}
+			| CURRENT_TIMESTAMP '(' Iconst ')'
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIMESTAMP_N, $3, @1);
+				}
+			| LOCALTIME
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIME, -1, @1);
+				}
+			| LOCALTIME '(' Iconst ')'
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIME_N, $3, @1);
+				}
+			| LOCALTIMESTAMP
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIMESTAMP, -1, @1);
+				}
+			| LOCALTIMESTAMP '(' Iconst ')'
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIMESTAMP_N, $3, @1);
+				}
+			| CURRENT_ROLE
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_ROLE, -1, @1);
+				}
+			| CURRENT_USER
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_USER, -1, @1);
+				}
+			| SESSION_USER
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_SESSION_USER, -1, @1);
+				}
+			| USER
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_USER, -1, @1);
+				}
+			| CURRENT_CATALOG
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_CATALOG, -1, @1);
+				}
+			| CURRENT_SCHEMA
+				{
+					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_SCHEMA, -1, @1);
+				}
+			| CAST '(' a_expr AS Typename ')'
+				{ $$ = makeTypeCast($3, $5, @1); }
+			| EXTRACT '(' extract_list ')'
+				{
+					$$ = _.makeFuncCall(_.SystemFuncName("date_part"), $3, @1);
+				}
+			| OVERLAY '(' overlay_list ')'
+				{
+					/* overlay(A PLACING B FROM C FOR D) is converted to
+					 * overlay(A, B, C, D)
+					 * overlay(A PLACING B FROM C) is converted to
+					 * overlay(A, B, C)
+					 */
+					$$ = _.makeFuncCall(_.SystemFuncName("overlay"), $3, @1);
+				}
+			| POSITION '(' position_list ')'
+				{
+					/* position(A in B) is converted to position(B, A) */
+					$$ = _.makeFuncCall(_.SystemFuncName("position"), $3, @1);
+				}
+			| SUBSTRING '(' substr_list ')'
+				{
+					/* substring(A from B for C) is converted to
+					 * substring(A, B, C) - thomas 2000-11-28
+					 */
+					$$ = _.makeFuncCall(_.SystemFuncName("substring"), $3, @1);
+				}
+			| TREAT '(' a_expr AS Typename ')'
+				{
+					/* TREAT(expr AS target) converts expr of a particular type to target,
+					 * which is defined to be a subtype of the original expression.
+					 * In SQL99, this is intended for use with structured UDTs,
+					 * but let's make this a generally useful form allowing stronger
+					 * coercions than are handled by implicit casting.
+					 *
+					 * Convert SystemTypeName() to SystemFuncName() even though
+					 * at the moment they result in the same thing.
+					 */
+					$$ = _.makeFuncCall(_.SystemFuncName($5.names[$5.names.length - 1].val.str),
+												[$3],
+												@1);
+				}
+			| TRIM '(' BOTH trim_list ')'
+				{
+					/* various trim expressions are defined in SQL
+					 * - thomas 1997-07-19
+					 */
+					$$ = _.makeFuncCall(_.SystemFuncName("btrim"), $4, @1);
+				}
+			| TRIM '(' LEADING trim_list ')'
+				{
+					$$ = _.makeFuncCall(_.SystemFuncName("ltrim"), $4, @1);
+				}
+			| TRIM '(' TRAILING trim_list ')'
+				{
+					$$ = _.makeFuncCall(_.SystemFuncName("rtrim"), $4, @1);
+				}
+			| TRIM '(' trim_list ')'
+				{
+					$$ = _.makeFuncCall(_.SystemFuncName("btrim"), $3, @1);
+				}
+			| NULLIF '(' a_expr ',' a_expr ')'
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_NULLIF, "=", $3, $5, @1);
+				}
+			| COALESCE '(' expr_list ')'
+				{
+					$$ = {
+						type: _.NodeTag.T_CoalesceExpr,
+						args: $3,
+						location: @1
+					};
+				}
+			| GREATEST '(' expr_list ')'
+				{
+					$$ = {
+						type: _.NodeTag.T_MinMaxExpr,
+						args: $3,
+						op: _.MinMaxOp.IS_GREATEST,
+						location: @1,
+					}
+				}
+			| LEAST '(' expr_list ')'
+				{
+					$$ = {
+						type: _.NodeTag.MinMaxExpr,
+						args: $3,
+						op: _.MinMaxOp.IS_LEAST,
+						location: @1
+					};
+				}
+			// | XMLCONCAT '(' expr_list ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLCONCAT, NULL, NIL, $3, @1);
+			// 	}
+			// | XMLELEMENT '(' NAME_P ColLabel ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, NIL, NIL, @1);
+			// 	}
+			// | XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, $6, NIL, @1);
+			// 	}
+			// | XMLELEMENT '(' NAME_P ColLabel ',' expr_list ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, NIL, $6, @1);
+			// 	}
+			// | XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ',' expr_list ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, $6, $8, @1);
+			// 	}
+			// | XMLEXISTS '(' c_expr xmlexists_argument ')'
+			// 	{
+			// 		/* xmlexists(A PASSING [BY REF] B [BY REF]) is
+			// 		 * converted to xmlexists(A, B)*/
+			// 		$$ = _.makeFuncCall(_.SystemFuncName("xmlexists"), [$3, $4], @1);
+			// 	}
+			// | XMLFOREST '(' xml_attribute_list ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLFOREST, NULL, $3, NIL, @1);
+			// 	}
+			// | XMLPARSE '(' document_or_content a_expr xml_whitespace_option ')'
+			// 	{
+			// 		XmlExpr *x = (XmlExpr *)
+			// 			makeXmlExpr(IS_XMLPARSE, NULL, NIL,
+			// 						list_make2($4, makeBoolAConst($5, -1)),
+			// 						@1);
+			// 		x.xmloption = $3;
+			// 		$$ = (Node *)x;
+			// 	}
+			// | XMLPI '(' NAME_P ColLabel ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLPI, $4, NULL, NIL, @1);
+			// 	}
+			// | XMLPI '(' NAME_P ColLabel ',' a_expr ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLPI, $4, NULL, [$6], @1);
+			// 	}
+			// | XMLROOT '(' a_expr ',' xml_root_version opt_xml_root_standalone ')'
+			// 	{
+			// 		$$ = makeXmlExpr(IS_XMLROOT, NULL, NIL,
+			// 						 list_make3($3, $5, $6), @1);
+			// 	}
+			// | XMLSERIALIZE '(' document_or_content a_expr AS SimpleTypename ')'
+			// 	{
+			// 		XmlSerialize *n = makeNode(XmlSerialize);
+			// 		n.xmloption = $3;
+			// 		n.expr = $4;
+			// 		n.typeName = $6;
+			// 		n.location = @1;
+			// 		$$ = (Node *)n;
+			// 	}
+		;
+
+/*
+ * SQL/XML support
+ */
+// xml_root_version: VERSION_P a_expr
+// 				{ $$ = $2; }
+// 			| VERSION_P NO VALUE_P
+// 				{ $$ = makeNullAConst(-1); }
+// 		;
+
+// opt_xml_root_standalone: ',' STANDALONE_P YES_P
+// 				{ $$ = makeIntConst(XML_STANDALONE_YES, -1); }
+// 			| ',' STANDALONE_P NO
+// 				{ $$ = makeIntConst(XML_STANDALONE_NO, -1); }
+// 			| ',' STANDALONE_P NO VALUE_P
+// 				{ $$ = makeIntConst(XML_STANDALONE_NO_VALUE, -1); }
+// 			| /*EMPTY*/
+// 				{ $$ = makeIntConst(XML_STANDALONE_OMITTED, -1); }
+// 		;
+
+// xml_attributes: XMLATTRIBUTES '(' xml_attribute_list ')'	{ $$ = $3; }
+// 		;
+
+// xml_attribute_list:	xml_attribute_el					{ $$ = [$1]; }
+// 			| xml_attribute_list ',' xml_attribute_el	{ $$ = lappend($1, $3); }
+// 		;
+
+// xml_attribute_el: a_expr AS ColLabel
+// 				{
+// 					$$ = makeNode(ResTarget);
+// 					$$.name = $3;
+// 					$$.indirection = NIL;
+// 					$$.val = (Node *) $1;
+// 					$$.location = @1;
+// 				}
+// 			| a_expr
+// 				{
+// 					$$ = makeNode(ResTarget);
+// 					$$.name = NULL;
+// 					$$.indirection = NIL;
+// 					$$.val = (Node *) $1;
+// 					$$.location = @1;
+// 				}
+// 		;
+
+// document_or_content: DOCUMENT_P						{ $$ = XMLOPTION_DOCUMENT; }
+// 			| CONTENT_P								{ $$ = XMLOPTION_CONTENT; }
+// 		;
+
+// xml_whitespace_option: PRESERVE WHITESPACE_P		{ $$ = true; }
+// 			| STRIP_P WHITESPACE_P					{ $$ = false; }
+// 			| /*EMPTY*/								{ $$ = false; }
+// 		;
+
+// /* We allow several variants for SQL and other compatibility. */
+// xmlexists_argument:
+// 			PASSING c_expr
+// 				{
+// 					$$ = $2;
+// 				}
+// 			| PASSING c_expr xml_passing_mech
+// 				{
+// 					$$ = $2;
+// 				}
+// 			| PASSING xml_passing_mech c_expr
+// 				{
+// 					$$ = $3;
+// 				}
+// 			| PASSING xml_passing_mech c_expr xml_passing_mech
+// 				{
+// 					$$ = $3;
+// 				}
+// 		;
+
+// xml_passing_mech:
+// 			BY REF
+// 			| BY VALUE_P
+// 		;
 
 
 /*
@@ -2263,9 +2962,8 @@ ConstBit:	BitWithLength
 BitWithLength:
 			BIT opt_varying '(' expr_list ')'
 				{
-					char *typname;
+					var typname = $2 ? "varbit" : "bit";
 
-					typname = $2 ? "varbit" : "bit";
 					$$ = _.SystemTypeName(typname);
 					$$.typmods = $4;
 					$$.location = @1;
@@ -2519,7 +3217,7 @@ a_expr:		c_expr									{ $$ = $1; }
 				}
 			| a_expr AT TIME ZONE a_expr			%prec AT
 				{
-					$$ = _.makeFuncCall(SystemFuncName("timezone"),
+					$$ = _.makeFuncCall(_.SystemFuncName("timezone"),
 											   [$5, $1],
 											   @2);
 				}

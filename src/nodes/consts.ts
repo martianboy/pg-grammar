@@ -1,4 +1,4 @@
-import { Node, IsA } from "./node";
+import { Node } from "./node";
 import { TypeName, TypeCast, A_Const, A_Expr_Kind } from "./parsenodes";
 import { NodeTag } from "./tags";
 import { Value } from "./value";
@@ -133,19 +133,19 @@ export function makeBoolAConst(state: boolean, location: number): TypeCast<NodeT
  */
 export function doNegate(n: Expr, location: number)
 {
-	if (IsA(n, 'A_Const'))
+	if (n.type === NodeTag.T_A_Const)
 	{
-		const con = n as unknown as A_Const;
+		const con = n;
 
 		/* report the constant's location as that of the '-' sign */
 		con.location = location;
 
-		if (con.val && con.val.type == 'T_Integer')
+		if (con.val && con.val.type == NodeTag.T_Integer)
 		{
 			con.val.val.ival = -con.val.val.ival;
 			return n;
 		}
-		if (con.val && con.val.type == 'T_Float')
+		if (con.val && con.val.type == NodeTag.T_Float)
 		{
 			doNegateFloat(con.val);
 			return n;

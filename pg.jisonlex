@@ -504,6 +504,7 @@ other			.
 
 
 {param}			{
+					yy.lval.ival = parseInt(yytext.slice(1));
 					return 'PARAM';
 				}
 

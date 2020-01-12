@@ -1,7 +1,8 @@
-import { Node } from '../nodes/node';
-import { SelectStmt, WithClause } from "../nodes/parsenodes";
+import { Node, IsA } from '../nodes/node';
+import { SelectStmt, WithClause, Indirection } from "../nodes/parsenodes";
 import { ereport, errcode, errmsg, parser_errposition, ERROR, ERRCODE_SYNTAX_ERROR } from '../common/errors';
 import { exprLocation } from '../nodes/nodefuncs';
+import { NodeTag } from '../nodes';
 
 /* insertSelectOptions()
  * Insert ORDER BY, etc into an already-constructed SelectStmt.
@@ -58,4 +59,21 @@ export function insertSelectOptions(stmt: SelectStmt,
 					 parser_errposition(exprLocation(withClause))));
 		stmt.withClause = withClause;
 	}
+}
+
+/* check_indirection --- check the result of indirection production
+ *
+ * We only allow '*' at the end of the list, but it's hard to enforce that
+ * in the grammar, so do it here.
+ */
+export function
+check_indirection(indirection: Indirection[], yyscanner: unknown): unknown[]
+{
+	const idx = indirection.findIndex(l => l.type === NodeTag.T_A_Star)
+
+	if (idx > -1 && idx < indirection.length - 1) {
+		throw new Error("improper use of \"*\"");
+	}
+
+	return indirection;
 }

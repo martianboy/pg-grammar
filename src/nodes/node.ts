@@ -68,7 +68,12 @@ export function makeNode(type: NodeTag) {
     return { type };
 }
 
-export function IsA<T extends NodeTag>(arg: Node<T> | null, nodeTag: string) {
+export function IsA<T extends NodeTag, N extends Node<T>>(arg: N | null, nodeTag: string) {
     if (arg == null) return false;
 	return typeof arg === 'object' && arg.type === 'T_' + nodeTag;
+}
+
+export function IsA_Tag<T extends NodeTag, N extends Node<T>, R extends N>(arg: N | null, tag: NodeTag): arg is R {
+    if (arg == null) return false;
+	return typeof arg === 'object' && arg.type === tag;
 }
