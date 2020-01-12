@@ -1,6 +1,6 @@
-const types = require('./types')
+import types from './types.js';
 
-module.exports = function parse(input) {
+export default function parse(input) {
     var self = this;
     var stack = new Array(128);         // token stack: stores token which leads to state at the same index (column storage)
     var sstack = new Array(128);        // state stack: stores states (column storage)
@@ -568,7 +568,7 @@ module.exports = function parse(input) {
             // shift:
             case 1:
                 stack[sp] = symbol;
-                const terminal = Object.getPrototypeOf(this).terminals_[symbol]
+                const terminal = this.terminals_[symbol]
                 vstack[sp] = Object.keys(lexer.yy.lval).length > 0 ?
                     (types[terminal] ? lexer.yy.lval[types[terminal]] : lexer.yy.lval) :
                     lexer.yytext;

@@ -1,4 +1,4 @@
-import { makeString, Value } from "./value";
+import { Value } from "./value";
 import { NodeTag } from './tags';
 import { Node, OnConflictAction } from './node';
 import { IntoClause, Expr, RangeVar, Alias, Oid } from "./primnodes";
@@ -481,7 +481,7 @@ export interface WithClause extends Node<NodeTag.T_WithClause>
 export interface InferClause extends Node<NodeTag.T_InferClause>
 {
 	indexElems: unknown[];		/* IndexElems to infer unique index */
-	whereClause: A_Expr;	/* qualification (partial-index predicate) */
+	whereClause: Expr;	/* qualification (partial-index predicate) */
 	conname: string;		/* Constraint name, or NULL if unnamed */
 	location: number;		/* token location, or -1 if unknown */
 }
@@ -602,12 +602,12 @@ export enum GroupingSetKind
 export interface GroupingSet extends Node<NodeTag.T_GroupingSet>
 {
 	kind: GroupingSetKind;
-	content: A_Expr[];
+	content: Expr[];
 	location: number;
 }
 
 
-interface BaseSelectStmt extends Node<NodeTag.T_SelectStmt> {
+export interface BaseSelectStmt extends Node<NodeTag.T_SelectStmt> {
 	/*
 	 * These fields are used in both "leaf" SelectStmts and upper-level
 	 * SelectStmts.
@@ -628,7 +628,7 @@ interface LeafSelectStmt extends BaseSelectStmt {
 	intoClause?: IntoClause;		/* target for SELECT INTO */
 	targetList: ResTarget[];	/* the target list (of ResTarget) */
 	fromClause: Array<RangeVar | SelectStmt>;		/* the FROM clause */
-	whereClause?: A_Expr;	/* WHERE qualification */
+	whereClause?: Expr;	/* WHERE qualification */
 	groupClause?: unknown[];	/* GROUP BY clauses */
 	havingClause?: unknown;	/* HAVING conditional-expression */
 	windowClause?: unknown[];	/* WINDOW window_name AS (...), ... */
@@ -656,56 +656,3 @@ interface UpperLevelSelectStmt extends BaseSelectStmt {
 }
 
 export type SelectStmt = LeafSelectStmt | UpperLevelSelectStmt;
-
-export function makeColumnRef(colname: string, indirection: any[], location: number, yyscanner: unknown) {
-  /*
-   * Generate a ColumnRef node, with an A_Indirection node added if there
-   * is any subscripting in the specified indirection list.  However,
-   * any field selection at the start of the indirection list must be
-   * transposed into the "fields" part of the ColumnRef node.
-   */
-  const c: ColumnRef = {
-    type: NodeTag.T_ColumnRef,
-    location,
-    fields: Array.isArray(indirection) ? indirection : []
-  };
-  let nfields = 0;
-
-  if (Array.isArray(indirection)) {
-    // for(const l of indirection) {
-    //     if (IsA(lfirst(l), A_Indices))
-    //     {
-    //         A_Indirection *i = makeNode(A_Indirection);
-    //         if (nfields == 0)
-    //         {
-    //             /* easy case - all indirection goes to A_Indirection */
-    //             c.fields = list_make1(makeString(colname));
-    //             i.indirection = check_indirection(indirection, yyscanner);
-    //         }
-    //         else
-    //         {
-    //             /* got to split the list in two */
-    //             i.indirection = check_indirection(list_copy_tail(indirection,
-    //                                                             nfields),
-    //                                             yyscanner);
-    //             indirection = list_truncate(indirection, nfields);
-    //             c.fields = lcons(makeString(colname), indirection);
-    //         }
-    //         i.arg = (Node *) c;
-    //         return (Node *) i;
-    //     }
-    //     else if (IsA(lfirst(l), A_Star))
-    //     {
-    //         /* We only allow '*' at the end of a ColumnRef */
-    //         if (lnext(indirection, l) != NULL)
-    //             parser_yyerror("improper use of \"*\"");
-    //     }
-    //     nfields++;
-    // }
-  }
-
-  /* No subscripting, so all indirection gets added to field list */
-  c.fields.unshift(makeString(colname));
-
-  return c;
-}

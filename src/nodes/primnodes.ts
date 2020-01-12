@@ -42,6 +42,8 @@ export type Expr =
 	| ScalarArrayOpExpr
 	| XmlExpr
 	| SubLink
+	| NullTest
+	| BooleanTest
 	;
 
 /*
@@ -73,7 +75,6 @@ export const PRS2_NEW_VARNO = 2;
 export type Oid = number;
 export type Index = number;
 export type AttrNumber = number;
-// export type Oid = number;
 
 export interface Var extends Node<NodeTag.T_Var>
 {
@@ -434,14 +435,14 @@ export interface ScalarArrayOpExpr extends Node<NodeTag.T_ScalarArrayOpExpr>
 export enum BoolExprType
 {
 	AND_EXPR, OR_EXPR, NOT_EXPR
-};
+}
 
 export interface BoolExpr extends Node<NodeTag.T_BoolExpr>
 {
 	boolop: BoolExprType;
 	args: any[];			/* arguments to this expression */
 	location: number;		/* token location, or -1 if unknown */
-};
+}
 
 /*
  * SubLink
@@ -528,7 +529,7 @@ export interface InferenceElem extends Node<NodeTag.T_InferenceElem>
 	expr: Expr;			/* expression to infer from, or NULL */
 	infercollid: number;	/* OID of collation, or InvalidOid */
 	inferopclass: number;	/* OID of att opclass, or InvalidOid */
-};
+}
 
 /*--------------------
  * TargetEntry -
@@ -872,7 +873,7 @@ export enum RowCompareType
 	ROWCOMPARE_GE = 4,			/* BTGreaterEqualStrategyNumber */
 	ROWCOMPARE_GT = 5,			/* BTGreaterStrategyNumber */
 	ROWCOMPARE_NE = 6			/* no such btree strategy */
-} RowCompareType;
+}
 
 export interface RowCompareExpr extends Node<NodeTag.T_RowCompareExpr>
 {
@@ -902,7 +903,7 @@ export enum MinMaxOp
 {
 	IS_GREATEST,
 	IS_LEAST
-} MinMaxOp;
+}
 
 export interface MinMaxExpr extends Node<NodeTag.T_MinMaxExpr>
 {
@@ -988,5 +989,64 @@ export interface XmlExpr extends Node<NodeTag.T_XmlExpr>
 	arg_names: Value<NodeTag.T_String>[] | null;		/* parallel list of Value strings */
 	args: unknown[];			/* list of expressions */
 	xmloption?: XmlOptionType;	/* DOCUMENT or CONTENT */
+	location: number;		/* token location, or -1 if unknown */
+}
+
+/* ----------------
+ * NullTest
+ *
+ * NullTest represents the operation of testing a value for NULLness.
+ * The appropriate test is performed and returned as a boolean Datum.
+ *
+ * When argisrow is false, this simply represents a test for the null value.
+ *
+ * When argisrow is true, the input expression must yield a rowtype, and
+ * the node implements "row IS [NOT] NULL" per the SQL standard.  This
+ * includes checking individual fields for NULLness when the row datum
+ * itself isn't NULL.
+ *
+ * NOTE: the combination of a rowtype input and argisrow==false does NOT
+ * correspond to the SQL notation "row IS [NOT] NULL"; instead, this case
+ * represents the SQL notation "row IS [NOT] DISTINCT FROM NULL".
+ * ----------------
+ */
+
+export enum NullTestType
+{
+	IS_NULL,
+	IS_NOT_NULL
+}
+
+export interface NullTest extends Node<NodeTag.T_NullTest>
+{
+	arg: Expr;			/* input expression */
+	nulltesttype: NullTestType;	/* IS NULL, IS NOT NULL */
+	argisrow: boolean;		/* T to perform field-by-field null checks */
+	location: number;		/* token location, or -1 if unknown */
+}
+
+/*
+ * BooleanTest
+ *
+ * BooleanTest represents the operation of determining whether a boolean
+ * is TRUE, FALSE, or UNKNOWN (ie, NULL).  All six meaningful combinations
+ * are supported.  Note that a NULL input does *not* cause a NULL result.
+ * The appropriate test is performed and returned as a boolean Datum.
+ */
+
+export enum BoolTestType
+{
+	IS_TRUE,
+	IS_NOT_TRUE,
+	IS_FALSE,
+	IS_NOT_FALSE,
+	IS_UNKNOWN,
+	IS_NOT_UNKNOWN
+}
+
+export interface BooleanTest extends Node<NodeTag.T_BooleanTest>
+{
+	arg: Expr;			/* input expression */
+	booltesttype: BoolTestType;	/* test type */
 	location: number;		/* token location, or -1 if unknown */
 }

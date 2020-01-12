@@ -2,7 +2,7 @@ import { Node, IsA } from '../nodes/node';
 import { SelectStmt, WithClause, Indirection } from "../nodes/parsenodes";
 import { ereport, errcode, errmsg, parser_errposition, ERROR, ERRCODE_SYNTAX_ERROR } from '../common/errors';
 import { exprLocation } from '../nodes/nodefuncs';
-import { NodeTag } from '../nodes';
+import { NodeTag } from '../nodes/index';
 
 /* insertSelectOptions()
  * Insert ORDER BY, etc into an already-constructed SelectStmt.

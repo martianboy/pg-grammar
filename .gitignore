@@ -1,3 +1,4 @@
 node_modules
 pg.js
 src/**/*.js
+output/*.json

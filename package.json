@@ -8,10 +8,14 @@
   },
   "author": "",
   "license": "ISC",
+  "type": "module",
   "dependencies": {
-    "jison-gho": "^0.6.1-216"
+    "jison-gho": "^0.6.1-216",
+    "pg-query-parser": "^0.2.4"
   },
   "devDependencies": {
+    "@zoltu/typescript-transformer-append-js-extension": "^1.0.1",
+    "ttypescript": "^1.5.10",
     "typescript": "^3.7.3"
   }
 }

@@ -1,7 +1,7 @@
 import { Node } from './node';
 import { RangeVar, Var, Index, AttrNumber, Oid, BoolExpr, BoolExprType, FromExpr, Const, Alias, Expr, SQLValueFunctionOp, XmlExpr, XmlExprOp } from "./primnodes";
 import { NodeTag } from "./tags";
-import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation, FuncCall, A_ArrayExpr } from "./parsenodes";
+import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation, FuncCall, A_ArrayExpr, ColumnRef } from "./parsenodes";
 import { makeString, Value } from "./value";
 import { BoolGetDatum } from './datum';
 import { BOOLOID } from '../common/pg_type_d';
@@ -399,6 +399,59 @@ export function makeXmlExpr(op: XmlExprOp, name: string, named_args: unknown[], 
 	};
 }
 
+export function makeColumnRef(colname: string, indirection: any[], location: number, yyscanner: unknown) {
+	/*
+	 * Generate a ColumnRef node, with an A_Indirection node added if there
+	 * is any subscripting in the specified indirection list.  However,
+	 * any field selection at the start of the indirection list must be
+	 * transposed into the "fields" part of the ColumnRef node.
+	 */
+	const c: ColumnRef = {
+	  type: NodeTag.T_ColumnRef,
+	  location,
+	  fields: Array.isArray(indirection) ? indirection : []
+	};
+	let nfields = 0;
+  
+	if (Array.isArray(indirection)) {
+	  // for(const l of indirection) {
+	  //     if (IsA(lfirst(l), A_Indices))
+	  //     {
+	  //         A_Indirection *i = makeNode(A_Indirection);
+	  //         if (nfields == 0)
+	  //         {
+	  //             /* easy case - all indirection goes to A_Indirection */
+	  //             c.fields = list_make1(makeString(colname));
+	  //             i.indirection = check_indirection(indirection, yyscanner);
+	  //         }
+	  //         else
+	  //         {
+	  //             /* got to split the list in two */
+	  //             i.indirection = check_indirection(list_copy_tail(indirection,
+	  //                                                             nfields),
+	  //                                             yyscanner);
+	  //             indirection = list_truncate(indirection, nfields);
+	  //             c.fields = lcons(makeString(colname), indirection);
+	  //         }
+	  //         i.arg = (Node *) c;
+	  //         return (Node *) i;
+	  //     }
+	  //     else if (IsA(lfirst(l), A_Star))
+	  //     {
+	  //         /* We only allow '*' at the end of a ColumnRef */
+	  //         if (lnext(indirection, l) != NULL)
+	  //             parser_yyerror("improper use of \"*\"");
+	  //     }
+	  //     nfields++;
+	  // }
+	}
+  
+	/* No subscripting, so all indirection gets added to field list */
+	c.fields.unshift(makeString(colname));
+  
+	return c;
+  }
+  
 /*
  * Merge the input and output parameters of a table function.
  */

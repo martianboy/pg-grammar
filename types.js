@@ -1,4 +1,4 @@
-module.exports = {
+export default {
     IDENT: 'str',
     FCONST: 'str',
     SCONST: 'str',

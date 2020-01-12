@@ -14,8 +14,6 @@
 
 %{
 
-const _ = require('./src');
-
 /*
  * GUC variables.  This is a DIRECT violation of the warning given at the
  * head of gram.y, ie flex/bison code must not depend on any GUC variables;
@@ -354,6 +352,45 @@ other			.
 				}
 
 <xq,xe,xus><<EOF>>		{ throw new Error("unterminated quoted string"); }
+
+
+{xdstart}		{
+					this.begin('xd');
+					yy.extra.literallen = 0;
+					yy.extra.literalbuf = '';
+				}
+{xuistart}		{
+					this.begin('xui');
+					yy.extra.literallen = 0;
+					yy.extra.literalbuf = '';
+				}
+<xd>{xdstop}	{
+					var ident = '';
+
+					this.popState();
+					if (yy.extra.literalbuf.length === 0)
+						throw new Error("zero-length delimited identifier");
+					ident = yy.extra.literalbuf;
+					if (yy.extra.literalbuf.length >= 64)
+						ident = yy.extra.literalbuf.slice(0, 64);
+					yy.lval.str = ident;
+					return 'IDENT';
+				}
+<xui>{dquote} {
+					this.less(1);
+					/* xuiend state looks for possible UESCAPE */
+					this.begin('xuiend');
+				}
+<xuiend>{whitespace} {
+					/* stay in xuiend state over whitespace */
+				}
+<xd,xui>{xddouble}	{
+					yy.extra.literalbuf += '"';
+				}
+<xd,xui>{xdinside}	{
+					yy.extra.literalbuf += yytext;
+				}
+<xd,xui><<EOF>>		{ throw new Error("unterminated quoted identifier"); }
 
 {typecast}		{
 					return 'TYPECAST';

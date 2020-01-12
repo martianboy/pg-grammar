@@ -1,9 +1,10 @@
 %code imports {
-	const _ = require('./src');
-	const { ereport, errcode, errmsg, parser_errposition } = require('./src/common/errors');
-	const NULL = null;
-	const NIL = null;
-	const yyscanner = null;
+import * as _ from './src/index.js';
+import { ereport, errcode, errmsg, parser_errposition } from './src/common/errors.js';
+
+const NULL = null;
+const NIL = null;
+const yyscanner = null;
 }
 
 %{
@@ -1522,6 +1523,19 @@ opt_repeatable_clause:
 		;
 
 /*
+ * Aggregate decoration clauses
+ */
+within_group_clause:
+			WITHIN GROUP_P '(' sort_clause ')'		{ $$ = $4; }
+			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+filter_clause:
+			FILTER '(' WHERE a_expr ')'				{ $$ = $4; }
+			| /*EMPTY*/								{ $$ = NULL; }
+		;
+
+/*
  * Window Definitions
  */
 window_clause:
@@ -2254,6 +2268,312 @@ expr_list:	a_expr
 				}
 		;
 
+/* function arguments can have names */
+func_arg_list:  func_arg_expr
+				{
+					$$ = [$1];
+				}
+			| func_arg_list ',' func_arg_expr
+				{
+					$$ = $1; $1.push($3);
+				}
+		;
+
+func_arg_expr:  a_expr
+				{
+					$$ = $1;
+				}
+			| param_name COLON_EQUALS a_expr
+				{
+					$$ = {
+						type: _.NodeTag.T_NamedArgExpr,
+						name: $1,
+						arg: $3,
+						argnumber: -1,		/* until determined */
+						location: @1
+					};
+				}
+			| param_name EQUALS_GREATER a_expr
+				{
+					$$ = {
+						type: _.NodeTag.T_NamedArgExpr,
+						name: $1,
+						arg: $3,
+						argnumber: -1,		/* until determined */
+						location: @1
+					}
+				}
+		;
+
+type_list:	Typename								{ $$ = [$1]; }
+			| type_list ',' Typename				{ $$ = $1; $1.push($3); }
+		;
+
+array_expr: '[' expr_list ']'
+				{
+					$$ = _.makeAArrayExpr($2, @1);
+				}
+			| '[' array_expr_list ']'
+				{
+					$$ = _.makeAArrayExpr($2, @1);
+				}
+			| '[' ']'
+				{
+					$$ = _.makeAArrayExpr(NIL, @1);
+				}
+		;
+
+array_expr_list: array_expr							{ $$ = [$1]; }
+			| array_expr_list ',' array_expr		{ $$ = $1; $1.push($3); }
+		;
+
+
+extract_list:
+			extract_arg FROM a_expr
+				{
+					$$ = [_.makeStringConst($1, @1), $3];
+				}
+			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+/* Allow delimited string Sconst in extract_arg as an SQL extension.
+ * - thomas 2001-04-12
+ */
+extract_arg:
+			IDENT									{ $$ = $1; }
+			| YEAR_P								{ $$ = "year"; }
+			| MONTH_P								{ $$ = "month"; }
+			| DAY_P									{ $$ = "day"; }
+			| HOUR_P								{ $$ = "hour"; }
+			| MINUTE_P								{ $$ = "minute"; }
+			| SECOND_P								{ $$ = "second"; }
+			| Sconst								{ $$ = $1; }
+		;
+
+/* OVERLAY() arguments
+ * SQL99 defines the OVERLAY() function:
+ * o overlay(text placing text from int for int)
+ * o overlay(text placing text from int)
+ * and similarly for binary strings
+ */
+overlay_list:
+			a_expr overlay_placing substr_from substr_for
+				{
+					$$ = [$1, $2, $3, $4];
+				}
+			| a_expr overlay_placing substr_from
+				{
+					$$ = [$1, $2, $3];
+				}
+		;
+
+overlay_placing:
+			PLACING a_expr
+				{ $$ = $2; }
+		;
+
+/* position_list uses b_expr not a_expr to avoid conflict with general IN */
+
+position_list:
+			b_expr IN_P b_expr						{ $$ = [$3, $1]; }
+			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+/* SUBSTRING() arguments
+ * SQL9x defines a specific syntax for arguments to SUBSTRING():
+ * o substring(text from int for int)
+ * o substring(text from int) get entire string from starting point "int"
+ * o substring(text for int) get first "int" characters of string
+ * o substring(text from pattern) get entire string matching pattern
+ * o substring(text from pattern for escape) same with specified escape char
+ * We also want to support generic substring functions which accept
+ * the usual generic list of arguments. So we will accept both styles
+ * here, and convert the SQL9x style to the generic list for further
+ * processing. - thomas 2000-11-28
+ */
+substr_list:
+			a_expr substr_from substr_for
+				{
+					$$ = [$1, $2, $3];
+				}
+			| a_expr substr_for substr_from
+				{
+					/* not legal per SQL99, but might as well allow it */
+					$$ = [$1, $3, $2];
+				}
+			| a_expr substr_from
+				{
+					$$ = [$1, $2];
+				}
+			| a_expr substr_for
+				{
+					/*
+					 * Since there are no cases where this syntax allows
+					 * a textual FOR value, we forcibly cast the argument
+					 * to int4.  The possible matches in pg_proc are
+					 * substring(text,int4) and substring(text,text),
+					 * and we don't want the parser to choose the latter,
+					 * which it is likely to do if the second argument
+					 * is unknown or doesn't have an implicit cast to int4.
+					 */
+					$$ = [$1, _.makeIntConst(1, -1),
+									_.makeTypeCast($2,
+												 _.SystemTypeName("int4"), -1)];
+				}
+			| expr_list
+				{
+					$$ = $1;
+				}
+			| /*EMPTY*/
+				{ $$ = NIL; }
+		;
+
+substr_from:
+			FROM a_expr								{ $$ = $2; }
+		;
+
+substr_for: FOR a_expr								{ $$ = $2; }
+		;
+
+trim_list:	a_expr FROM expr_list					{ $$ = $3; $3.push($1); }
+			| FROM expr_list						{ $$ = $2; }
+			| expr_list								{ $$ = $1; }
+		;
+
+in_expr:	select_with_parens
+				{
+					/* other fields will be filled later */
+					$$ = {
+						type: _.NodeTag.T_SubLink,
+						subselect: $1
+					};
+				}
+			| '(' expr_list ')'						{ $$ = $2; }
+		;
+
+/*
+ * Define SQL-style CASE clause.
+ * - Full specification
+ *	CASE WHEN a = b THEN c ... ELSE d END
+ * - Implicit argument
+ *	CASE a WHEN b THEN c ... ELSE d END
+ */
+case_expr:	CASE case_arg when_clause_list case_default END_P
+				{
+					$$ = {
+						type: _.NodeTag.T_CaseExpr,
+						casetype: -1, /* not analyzed yet */
+						arg: $2,
+						args: $3,
+						defresult: $4,
+						location: @1,
+					};
+				}
+		;
+
+when_clause_list:
+			/* There must be at least one */
+			when_clause								{ $$ = [$1]; }
+			| when_clause_list when_clause			{ $$ = $1; $1.push($2); }
+		;
+
+when_clause:
+			WHEN a_expr THEN a_expr
+				{
+					$$ = {
+						type: _.NodeTag.T_CaseWhen,
+						expr: $2,
+						result: $4,
+						location: @1
+					};
+				}
+		;
+
+case_default:
+			ELSE a_expr								{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = NULL; }
+		;
+
+case_arg:	a_expr									{ $$ = $1; }
+			| /*EMPTY*/								{ $$ = NULL; }
+		;
+
+/*
+ * Restricted expressions
+ *
+ * b_expr is a subset of the complete expression syntax defined by a_expr.
+ *
+ * Presently, AND, NOT, IS, and IN are the a_expr keywords that would
+ * cause trouble in the places where b_expr is used.  For simplicity, we
+ * just eliminate all the boolean-keyword-operator productions from b_expr.
+ */
+b_expr:		c_expr
+				{ $$ = $1; }
+			| b_expr TYPECAST Typename
+				{ $$ = _.makeTypeCast($1, $3, @2); }
+			| '+' b_expr					%prec UMINUS
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "+", NULL, $2, @1); }
+			| '-' b_expr					%prec UMINUS
+				{ $$ = doNegate($2, @1); }
+			| b_expr '+' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "+", $1, $3, @2); }
+			| b_expr '-' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "-", $1, $3, @2); }
+			| b_expr '*' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "*", $1, $3, @2); }
+			| b_expr '/' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "/", $1, $3, @2); }
+			| b_expr '%' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "%", $1, $3, @2); }
+			| b_expr '^' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "^", $1, $3, @2); }
+			| b_expr '<' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "<", $1, $3, @2); }
+			| b_expr '>' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, ">", $1, $3, @2); }
+			| b_expr '=' b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "=", $1, $3, @2); }
+			| b_expr LESS_EQUALS b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "<=", $1, $3, @2); }
+			| b_expr GREATER_EQUALS b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, ">=", $1, $3, @2); }
+			| b_expr NOT_EQUALS b_expr
+				{ $$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OP, "<>", $1, $3, @2); }
+			| b_expr qual_Op b_expr				%prec Op
+				{ $$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP, $2, $1, $3, @2); }
+			| qual_Op b_expr					%prec Op
+				{ $$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP, $1, NULL, $2, @1); }
+			| b_expr qual_Op					%prec POSTFIXOP
+				{ $$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP, $2, $1, NULL, @2); }
+			| b_expr IS DISTINCT FROM b_expr		%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_DISTINCT, "=", $1, $5, @2);
+				}
+			| b_expr IS NOT DISTINCT FROM b_expr	%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_NOT_DISTINCT, "=", $1, $6, @2);
+				}
+			| b_expr IS OF '(' type_list ')'		%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OF, "=", $1, $5, @2);
+				}
+			| b_expr IS NOT OF '(' type_list ')'	%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OF, "<>", $1, $6, @2);
+				}
+			| b_expr IS DOCUMENT_P					%prec IS
+				{
+					$$ = _.makeXmlExpr(_.XmlExprOp.IS_DOCUMENT, NULL, NIL,
+									 [$1], @2);
+				}
+			| b_expr IS NOT DOCUMENT_P				%prec IS
+				{
+					$$ = _.makeNotExpr(_.makeXmlExpr(_.XmlExprOp.IS_DOCUMENT, NULL, NIL,
+												 [$1], @2),
+									 @2);
+				}
+		;
+
 /*
  * Productions that can be used in both a_expr and b_expr.
  *
@@ -2293,7 +2613,7 @@ c_expr:		columnref								{ $$ = $1; }
 							indirection: _.check_indirection($4, yyscanner),
 						};
 					}
-					else if (operator_precedence_warning)
+					else if (true /* operator_precedence_warning */)
 					{
 						/*
 						 * If precedence warnings are enabled, insert
@@ -2551,66 +2871,66 @@ func_expr_common_subexpr:
 				}
 			| CURRENT_DATE
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_DATE, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_DATE, -1, @1);
 				}
 			| CURRENT_TIME
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIME, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_TIME, -1, @1);
 				}
 			| CURRENT_TIME '(' Iconst ')'
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIME_N, $3, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_TIME_N, $3, @1);
 				}
 			| CURRENT_TIMESTAMP
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIMESTAMP, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_TIMESTAMP, -1, @1);
 				}
 			| CURRENT_TIMESTAMP '(' Iconst ')'
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_TIMESTAMP_N, $3, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_TIMESTAMP_N, $3, @1);
 				}
 			| LOCALTIME
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIME, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_LOCALTIME, -1, @1);
 				}
 			| LOCALTIME '(' Iconst ')'
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIME_N, $3, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_LOCALTIME_N, $3, @1);
 				}
 			| LOCALTIMESTAMP
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIMESTAMP, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_LOCALTIMESTAMP, -1, @1);
 				}
 			| LOCALTIMESTAMP '(' Iconst ')'
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_LOCALTIMESTAMP_N, $3, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_LOCALTIMESTAMP_N, $3, @1);
 				}
 			| CURRENT_ROLE
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_ROLE, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_ROLE, -1, @1);
 				}
 			| CURRENT_USER
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_USER, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_USER, -1, @1);
 				}
 			| SESSION_USER
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_SESSION_USER, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_SESSION_USER, -1, @1);
 				}
 			| USER
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_USER, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_USER, -1, @1);
 				}
 			| CURRENT_CATALOG
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_CATALOG, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_CATALOG, -1, @1);
 				}
 			| CURRENT_SCHEMA
 				{
-					$$ = _.makeSQLValueFunction(SVFOP_CURRENT_SCHEMA, -1, @1);
+					$$ = _.makeSQLValueFunction(_.SQLValueFunctionOp.SVFOP_CURRENT_SCHEMA, -1, @1);
 				}
 			| CAST '(' a_expr AS Typename ')'
-				{ $$ = makeTypeCast($3, $5, @1); }
+				{ $$ = _.makeTypeCast($3, $5, @1); }
 			| EXTRACT '(' extract_list ')'
 				{
 					$$ = _.makeFuncCall(_.SystemFuncName("date_part"), $3, @1);
@@ -2702,23 +3022,23 @@ func_expr_common_subexpr:
 				}
 			// | XMLCONCAT '(' expr_list ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLCONCAT, NULL, NIL, $3, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLCONCAT, NULL, NIL, $3, @1);
 			// 	}
 			// | XMLELEMENT '(' NAME_P ColLabel ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, NIL, NIL, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLELEMENT, $4, NIL, NIL, @1);
 			// 	}
 			// | XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, $6, NIL, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLELEMENT, $4, $6, NIL, @1);
 			// 	}
 			// | XMLELEMENT '(' NAME_P ColLabel ',' expr_list ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, NIL, $6, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLELEMENT, $4, NIL, $6, @1);
 			// 	}
 			// | XMLELEMENT '(' NAME_P ColLabel ',' xml_attributes ',' expr_list ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLELEMENT, $4, $6, $8, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLELEMENT, $4, $6, $8, @1);
 			// 	}
 			// | XMLEXISTS '(' c_expr xmlexists_argument ')'
 			// 	{
@@ -2728,7 +3048,7 @@ func_expr_common_subexpr:
 			// 	}
 			// | XMLFOREST '(' xml_attribute_list ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLFOREST, NULL, $3, NIL, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLFOREST, NULL, $3, NIL, @1);
 			// 	}
 			// | XMLPARSE '(' document_or_content a_expr xml_whitespace_option ')'
 			// 	{
@@ -2741,20 +3061,20 @@ func_expr_common_subexpr:
 			// 	}
 			// | XMLPI '(' NAME_P ColLabel ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLPI, $4, NULL, NIL, @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLPI, $4, NULL, NIL, @1);
 			// 	}
 			// | XMLPI '(' NAME_P ColLabel ',' a_expr ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLPI, $4, NULL, [$6], @1);
+			// 		$$ = _.makeXmlExpr(IS_XMLPI, $4, NULL, [$6], @1);
 			// 	}
 			// | XMLROOT '(' a_expr ',' xml_root_version opt_xml_root_standalone ')'
 			// 	{
-			// 		$$ = makeXmlExpr(IS_XMLROOT, NULL, NIL,
+			// 		$$ = _.makeXmlExpr(IS_XMLROOT, NULL, NIL,
 			// 						 list_make3($3, $5, $6), @1);
 			// 	}
 			// | XMLSERIALIZE '(' document_or_content a_expr AS SimpleTypename ')'
 			// 	{
-			// 		XmlSerialize *n = makeNode(XmlSerialize);
+			// 		XmlSerialize *n = _.makeNode(XmlSerialize);
 			// 		n.xmloption = $3;
 			// 		n.expr = $4;
 			// 		n.typeName = $6;
@@ -2769,29 +3089,29 @@ func_expr_common_subexpr:
 // xml_root_version: VERSION_P a_expr
 // 				{ $$ = $2; }
 // 			| VERSION_P NO VALUE_P
-// 				{ $$ = makeNullAConst(-1); }
+// 				{ $$ = _.makeNullAConst(-1); }
 // 		;
 
 // opt_xml_root_standalone: ',' STANDALONE_P YES_P
-// 				{ $$ = makeIntConst(XML_STANDALONE_YES, -1); }
+// 				{ $$ = _.makeIntConst(XML_STANDALONE_YES, -1); }
 // 			| ',' STANDALONE_P NO
-// 				{ $$ = makeIntConst(XML_STANDALONE_NO, -1); }
+// 				{ $$ = _.makeIntConst(XML_STANDALONE_NO, -1); }
 // 			| ',' STANDALONE_P NO VALUE_P
-// 				{ $$ = makeIntConst(XML_STANDALONE_NO_VALUE, -1); }
+// 				{ $$ = _.makeIntConst(XML_STANDALONE_NO_VALUE, -1); }
 // 			| /*EMPTY*/
-// 				{ $$ = makeIntConst(XML_STANDALONE_OMITTED, -1); }
+// 				{ $$ = _.makeIntConst(XML_STANDALONE_OMITTED, -1); }
 // 		;
 
 // xml_attributes: XMLATTRIBUTES '(' xml_attribute_list ')'	{ $$ = $3; }
 // 		;
 
 // xml_attribute_list:	xml_attribute_el					{ $$ = [$1]; }
-// 			| xml_attribute_list ',' xml_attribute_el	{ $$ = lappend($1, $3); }
+// 			| xml_attribute_list ',' xml_attribute_el	{ $$ = $1; $1.push($3); }
 // 		;
 
 // xml_attribute_el: a_expr AS ColLabel
 // 				{
-// 					$$ = makeNode(ResTarget);
+// 					$$ = _.makeNode(ResTarget);
 // 					$$.name = $3;
 // 					$$.indirection = NIL;
 // 					$$.val = (Node *) $1;
@@ -2799,7 +3119,7 @@ func_expr_common_subexpr:
 // 				}
 // 			| a_expr
 // 				{
-// 					$$ = makeNode(ResTarget);
+// 					$$ = _.makeNode(ResTarget);
 // 					$$.name = NULL;
 // 					$$.indirection = NIL;
 // 					$$.val = (Node *) $1;
@@ -3265,6 +3585,359 @@ a_expr:		c_expr									{ $$ = $1; }
 				{ $$ = _.makeNotExpr($2, @1); }
 			| NOT_LA a_expr						%prec NOT
 				{ $$ = _.makeNotExpr($2, @1); }
+
+			| a_expr LIKE a_expr
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_LIKE, "~~",
+												   $1, $3, @2);
+				}
+			| a_expr LIKE a_expr ESCAPE a_expr					%prec LIKE
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("like_escape"),
+											   [$3, $5],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_LIKE, "~~",
+												   $1, n, @2);
+				}
+			| a_expr NOT_LA LIKE a_expr							%prec NOT_LA
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_LIKE, "!~~",
+												   $1, $4, @2);
+				}
+			| a_expr NOT_LA LIKE a_expr ESCAPE a_expr			%prec NOT_LA
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("like_escape"),
+											   [$4, $6],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_LIKE, "!~~",
+												   $1, n, @2);
+				}
+			| a_expr ILIKE a_expr
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_ILIKE, "~~*",
+												   $1, $3, @2);
+				}
+			| a_expr ILIKE a_expr ESCAPE a_expr					%prec ILIKE
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("like_escape"),
+											   [$3, $5],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_ILIKE, "~~*",
+												   $1, n, @2);
+				}
+			| a_expr NOT_LA ILIKE a_expr						%prec NOT_LA
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_ILIKE, "!~~*",
+												   $1, $4, @2);
+				}
+			| a_expr NOT_LA ILIKE a_expr ESCAPE a_expr			%prec NOT_LA
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("like_escape"),
+											   [$4, $6],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_ILIKE, "!~~*",
+												   $1, n, @2);
+				}
+
+			| a_expr SIMILAR TO a_expr							%prec SIMILAR
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("similar_to_escape"),
+											   [$4],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_SIMILAR, "~",
+												   $1, n, @2);
+				}
+			| a_expr SIMILAR TO a_expr ESCAPE a_expr			%prec SIMILAR
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("similar_to_escape"),
+											   [$4, $6],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_SIMILAR, "~",
+												   $1, n, @2);
+				}
+			| a_expr NOT_LA SIMILAR TO a_expr					%prec NOT_LA
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("similar_to_escape"),
+											   [$5],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_SIMILAR, "!~",
+												   $1, n, @2);
+				}
+			| a_expr NOT_LA SIMILAR TO a_expr ESCAPE a_expr		%prec NOT_LA
+				{
+					var n = _.makeFuncCall(_.SystemFuncName("similar_to_escape"),
+											   [$5, $7],
+											   @2);
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_SIMILAR, "!~",
+												   $1, n, @2);
+				}
+
+			/* NullTest clause
+			 * Define SQL-style Null test clause.
+			 * Allow two forms described in the standard:
+			 *	a IS NULL
+			 *	a IS NOT NULL
+			 * Allow two SQL extensions
+			 *	a ISNULL
+			 *	a NOTNULL
+			 */
+			| a_expr IS NULL_P							%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_NullTest,
+						arg: $1,
+						nulltesttype: _.NullTestType.IS_NULL,
+						location: @2,
+					}
+				}
+			| a_expr ISNULL
+				{
+					$$ = {
+						type: _.NodeTag.T_NullTest,
+						arg: $1,
+						nulltesttype: _.NullTestType.IS_NULL,
+						location: @2,
+					}
+				}
+			| a_expr IS NOT NULL_P						%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_NullTest,
+						arg: $1,
+						nulltesttype: _.NullTestType.IS_NOT_NULL,
+						location: @2,
+					}
+				}
+			| a_expr NOTNULL
+				{
+					$$ = {
+						type: _.NodeTag.T_NullTest,
+						arg: $1,
+						nulltesttype: _.NullTestType.IS_NOT_NULL,
+						location: @2,
+					}
+				}
+			| row OVERLAPS row
+				{
+					if ($1.length != 2)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("wrong number of parameters on left side of OVERLAPS expression"),
+								 parser_errposition(@1)));
+					if ($3.length != 2)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("wrong number of parameters on right side of OVERLAPS expression"),
+								 parser_errposition(@3)));
+					$$ = _.makeFuncCall(_.SystemFuncName("overlaps"),
+											   list_concat($1, $3),
+											   @2);
+				}
+			| a_expr IS TRUE_P							%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_BooleanTest,
+						arg: $1,
+						booltesttype: _.BoolTestType.IS_TRUE,
+						location: @2,
+					}
+				}
+			| a_expr IS NOT TRUE_P						%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_BooleanTest,
+						arg: $1,
+						booltesttype: _.BoolTestType.IS_NOT_TRUE,
+						location: @2,
+					}
+				}
+			| a_expr IS FALSE_P							%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_BooleanTest,
+						arg: $1,
+						booltesttype: _.BoolTestType.IS_FALSE,
+						location: @2,
+					}
+				}
+			| a_expr IS NOT FALSE_P						%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_BooleanTest,
+						arg: $1,
+						booltesttype: _.BoolTestType.IS_NOT_FALSE,
+						location: @2,
+					}
+				}
+			| a_expr IS UNKNOWN							%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_BooleanTest,
+						arg: $1,
+						booltesttype: _.BoolTestType.IS_UNKNOWN,
+						location: @2,
+					}
+				}
+			| a_expr IS NOT UNKNOWN						%prec IS
+				{
+					$$ = {
+						type: _.NodeTag.T_BooleanTest,
+						arg: $1,
+						booltesttype: _.BoolTestType.IS_NOT_UNKNOWN,
+						location: @2,
+					}
+				}
+			| a_expr IS DISTINCT FROM a_expr			%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_DISTINCT, "=", $1, $5, @2);
+				}
+			| a_expr IS NOT DISTINCT FROM a_expr		%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_NOT_DISTINCT, "=", $1, $6, @2);
+				}
+			| a_expr IS OF '(' type_list ')'			%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OF, "=", $1, $5, @2);
+				}
+			| a_expr IS NOT OF '(' type_list ')'		%prec IS
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_OF, "<>", $1, $6, @2);
+				}
+			| a_expr BETWEEN opt_asymmetric b_expr AND a_expr		%prec BETWEEN
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_BETWEEN,
+												   "BETWEEN",
+												   $1,
+												   [$4, $6],
+												   @2);
+				}
+			| a_expr NOT_LA BETWEEN opt_asymmetric b_expr AND a_expr %prec NOT_LA
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_NOT_BETWEEN,
+												   "NOT BETWEEN",
+												   $1,
+												   [$5, $7],
+												   @2);
+				}
+			| a_expr BETWEEN SYMMETRIC b_expr AND a_expr			%prec BETWEEN
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_BETWEEN_SYM,
+												   "BETWEEN SYMMETRIC",
+												   $1,
+												   [$4, $6],
+												   @2);
+				}
+			| a_expr NOT_LA BETWEEN SYMMETRIC b_expr AND a_expr		%prec NOT_LA
+				{
+					$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_NOT_BETWEEN_SYM,
+												   "NOT BETWEEN SYMMETRIC",
+												   $1,
+												   [$5, $7],
+												   @2);
+				}
+			| a_expr IN_P in_expr
+				{
+					/* in_expr returns a SubLink or a list of a_exprs */
+					if (_.IsA($3, 'SubLink'))
+					{
+						/* generate foo = ANY (subquery) */
+						var n = $3;
+						n.subLinkType = _.SubLinkType.ANY_SUBLINK;
+						n.subLinkId = 0;
+						n.testexpr = $1;
+						n.operName = NIL;		/* show it's IN not = ANY */
+						n.location = @2;
+						$$ = n;
+					}
+					else
+					{
+						/* generate scalar IN expression */
+						$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_IN, "=", $1, $3, @2);
+					}
+				}
+			| a_expr NOT_LA IN_P in_expr						%prec NOT_LA
+				{
+					/* in_expr returns a SubLink or a list of a_exprs */
+					if (_.IsA($4, 'SubLink'))
+					{
+						/* generate NOT (foo = ANY (subquery)) */
+						/* Make an = ANY node */
+						var n = $4;
+						n.subLinkType = _.SubLinkType.ANY_SUBLINK;
+						n.subLinkId = 0;
+						n.testexpr = $1;
+						n.operName = NIL;		/* show it's IN not = ANY */
+						n.location = @2;
+						/* Stick a NOT on top; must have same parse location */
+						$$ = _.makeNotExpr(n, @2);
+					}
+					else
+					{
+						/* generate scalar NOT IN expression */
+						$$ = _.makeSimpleA_Expr(_.A_Expr_Kind.AEXPR_IN, "<>", $1, $4, @2);
+					}
+				}
+			| a_expr subquery_Op sub_type select_with_parens	%prec Op
+				{
+					$$ = {
+						type: _.NodeTag.T_SubLink,
+						subLinkType: $3,
+						subLinkId: 0,
+						testexpr: $1,
+						operName: $2,
+						subselect: $4,
+						location: @2
+					};
+				}
+			| a_expr subquery_Op sub_type '(' a_expr ')'		%prec Op
+				{
+					if ($3 == _.SubLinkType.ANY_SUBLINK)
+						$$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP_ANY, $2, $1, $5, @2);
+					else
+						$$ = _.makeA_Expr(_.A_Expr_Kind.AEXPR_OP_ALL, $2, $1, $5, @2);
+				}
+			| UNIQUE select_with_parens
+				{
+					/* Not sure how to get rid of the parentheses
+					 * but there are lots of shift/reduce errors without them.
+					 *
+					 * Should be able to implement this by plopping the entire
+					 * select into a node, then transforming the target expressions
+					 * from whatever they are into count(*), and testing the
+					 * entire result equal to one.
+					 * But, will probably implement a separate node in the executor.
+					 */
+					ereport(ERROR,
+							(errcode(_.ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("UNIQUE predicate is not yet implemented"),
+							 parser_errposition(@1)));
+				}
+			| a_expr IS DOCUMENT_P					%prec IS
+				{
+					$$ = _.makeXmlExpr(_.XmlExprOp.IS_DOCUMENT, NULL, NIL,
+									 [$1], @2);
+				}
+			| a_expr IS NOT DOCUMENT_P				%prec IS
+				{
+					$$ = _.makeNotExpr(_.makeXmlExpr(_.XmlExprOp.IS_DOCUMENT, NULL, NIL,
+												 [$1], @2),
+									 @2);
+				}
+			| DEFAULT
+				{
+					/*
+					 * The SQL spec only allows DEFAULT in "contextually typed
+					 * expressions", but for us, it's easier to allow it in
+					 * any a_expr and then throw error during parse analysis
+					 * if it's in an inappropriate context.  This way also
+					 * lets us say something smarter than "syntax error".
+					 */
+					$$ = {
+						type: _.NodeTag.T_SetToDefault,
+						/* parse analysis will fill in the rest */
+						location: @1
+					}
+				}
 		;
 
 
@@ -3474,6 +4147,29 @@ sortby_list:
 			| sortby_list ',' sortby				{ $1.push($3); $$ = $1; }
 		;
 
+sortby:		a_expr USING qual_all_Op opt_nulls_order
+				{
+					$$ = {
+						type: _.NodeTag.T_SortBy,
+						node: $1,
+						sortby_dir: _.SortByDir.SORTBY_USING,
+						sortby_nulls: $4,
+						useOp: $3,
+						location: @3,
+					};
+				}
+			| a_expr opt_asc_desc opt_nulls_order
+				{
+					$$ = {
+						type: _.NodeTag.T_SortBy,
+						node: $1,
+						sortby_dir: $2,
+						sortby_nulls: $3,
+						useOp: NIL,
+						location: -1		/* no operator */
+					};
+				}
+		;
 
 select_limit:
 			limit_clause offset_clause			{ $$ = [$2, $1]; }
@@ -3531,4 +4227,15 @@ select_limit_value:
 
 select_offset_value:
 			a_expr									{ $$ = $1; }
+		;
+
+
+opt_asc_desc: ASC							{ $$ = _.SortByDir.SORTBY_ASC; }
+			| DESC							{ $$ = _.SortByDir.SORTBY_DESC; }
+			| /*EMPTY*/						{ $$ = _.SortByDir.SORTBY_DEFAULT; }
+		;
+
+opt_nulls_order: NULLS_LA FIRST_P			{ $$ = _.SortByNulls.SORTBY_NULLS_FIRST; }
+			| NULLS_LA LAST_P				{ $$ = _.SortByNulls.SORTBY_NULLS_LAST; }
+			| /*EMPTY*/						{ $$ = _.SortByNulls.SORTBY_NULLS_DEFAULT; }
 		;
