@@ -1,7 +1,7 @@
 import { Node } from './node';
 import { RangeVar, Var, Index, AttrNumber, Oid, BoolExpr, BoolExprType, FromExpr, Const, Alias, Expr, SQLValueFunctionOp, XmlExpr, XmlExprOp } from "./primnodes";
 import { NodeTag } from "./tags";
-import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation, FuncCall, A_ArrayExpr, ColumnRef } from "./parsenodes";
+import { TypeName, A_Expr, A_Expr_Kind, GroupingSetKind, GroupingSet, SelectStmt, SetOperation, FuncCall, A_ArrayExpr, ColumnRef, DefElem, DefElemAction } from "./parsenodes";
 import { makeString, Value } from "./value";
 import { BoolGetDatum } from './datum';
 import { BOOLOID } from '../common/pg_type_d';
@@ -332,6 +332,42 @@ export function makeSetOp(op: SetOperation, all: boolean, larg: SelectStmt, rarg
 		all,
 		larg,
 		rarg
+	};
+}
+
+/*
+ * makeDefElem -
+ *	build a DefElem node
+ *
+ * This is sufficient for the "typical" case with an unqualified option name
+ * and no special action.
+ */
+export function makeDefElem(name: string, arg: Value<any> | TypeName, location: number): DefElem
+{
+	return {
+		type: NodeTag.T_DefElem,
+		defnamespace: null,
+		defname: name,
+		arg: arg,
+		defaction: DefElemAction.DEFELEM_UNSPEC,
+		location: location,
+	};
+}
+
+/*
+ * makeDefElemExtended -
+ *	build a DefElem node with all fields available to be specified
+ */
+export function makeDefElemExtended(nameSpace: string, name: string, arg: Value<any> | TypeName,
+					defaction: DefElemAction, location: number): DefElem
+{
+	return {
+		type: NodeTag.T_DefElem,
+		defnamespace: nameSpace,
+		defname: name,
+		arg,
+		defaction,
+		location,
 	};
 }
 

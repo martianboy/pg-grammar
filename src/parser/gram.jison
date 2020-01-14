@@ -1086,6 +1086,32 @@ values_clause:
 /*****************************************************************************
  *
  *		QUERY:
+ *				DELETE STATEMENTS
+ *
+ *****************************************************************************/
+
+DeleteStmt: opt_with_clause DELETE_P FROM relation_expr_opt_alias
+			using_clause where_or_current_clause returning_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_DeleteStmt,
+						relation: $4,
+						usingClause: $5,
+						whereClause: $6,
+						returningList: $7,
+						withClause: $1,
+					};
+				}
+		;
+
+using_clause:
+				USING from_list						{ $$ = $2; }
+			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+/*****************************************************************************
+ *
+ *		QUERY:
  *				LOCK TABLE
  *
  *****************************************************************************/
@@ -1238,6 +1264,179 @@ opt_hold: /* EMPTY */						{ $$ = 0; }
 			| WITHOUT HOLD					{ $$ = 0; }
 		;
 
+
+/*****************************************************************************
+ *
+ *		Transactions:
+ *
+ *		BEGIN / COMMIT / ROLLBACK
+ *		(also older versions END / ABORT)
+ *
+ *****************************************************************************/
+
+TransactionStmt:
+			ABORT_P opt_transaction opt_transaction_chain
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_ROLLBACK,
+						options: NIL,
+						chain: $3
+					};
+				}
+			| BEGIN_P opt_transaction transaction_mode_list_or_empty
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_BEGIN,
+						options: $3,
+					};
+				}
+			| START TRANSACTION transaction_mode_list_or_empty
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_START,
+						options: $3,
+					};
+				}
+			| COMMIT opt_transaction opt_transaction_chain
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_COMMIT,
+						options: NIL,
+						chain: $3
+					};
+				}
+			| END_P opt_transaction opt_transaction_chain
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_COMMIT,
+						options: NIL,
+						chain: $3
+					};
+				}
+			| ROLLBACK opt_transaction opt_transaction_chain
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_ROLLBACK,
+						options: NIL,
+						chain: $3
+					};
+				}
+			| SAVEPOINT ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_SAVEPOINT,
+						savepoint_name: $2,
+					};
+				}
+			| RELEASE SAVEPOINT ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_RELEASE,
+						savepoint_name: $3,
+					};
+				}
+			| RELEASE ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_RELEASE,
+						savepoint_name: $2,
+					};
+				}
+			| ROLLBACK opt_transaction TO SAVEPOINT ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_ROLLBACK_TO,
+						savepoint_name: $5,
+					};
+				}
+			| ROLLBACK opt_transaction TO ColId
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_ROLLBACK_TO,
+						savepoint_name: $4,
+					};
+				}
+			| PREPARE TRANSACTION Sconst
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_PREPARE,
+						gid: $3,
+					};
+				}
+			| COMMIT PREPARED Sconst
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_COMMIT_PREPARED,
+						gid: $3,
+					};
+				}
+			| ROLLBACK PREPARED Sconst
+				{
+					$$ = {
+						type: _.NodeTag.T_TransactionStmt,
+						kind: _.TransactionStmtKind.TRANS_STMT_ROLLBACK_PREPARED,
+						gid: $3,
+					};
+				}
+		;
+
+opt_transaction:	WORK							{}
+			| TRANSACTION							{}
+			| /*EMPTY*/								{}
+		;
+
+transaction_mode_item:
+			ISOLATION LEVEL iso_level
+					{ $$ = _.makeDefElem("transaction_isolation",
+									   _.makeStringConst($3, @3), @1); }
+			| READ ONLY
+					{ $$ = _.makeDefElem("transaction_read_only",
+									   _.makeIntConst(true, @1), @1); }
+			| READ WRITE
+					{ $$ = _.makeDefElem("transaction_read_only",
+									   _.makeIntConst(false, @1), @1); }
+			| DEFERRABLE
+					{ $$ = _.makeDefElem("transaction_deferrable",
+									   _.makeIntConst(true, @1), @1); }
+			| NOT DEFERRABLE
+					{ $$ = _.makeDefElem("transaction_deferrable",
+									   _.makeIntConst(false, @1), @1); }
+		;
+
+/* Syntax with commas is SQL-spec, without commas is Postgres historical */
+transaction_mode_list:
+			transaction_mode_item
+					{ $$ = [$1]; }
+			| transaction_mode_list ',' transaction_mode_item
+					{ $$ = $1; $1.push($3); }
+			| transaction_mode_list transaction_mode_item
+					{ $$ = $1; $1.push($2); }
+		;
+
+transaction_mode_list_or_empty:
+			transaction_mode_list
+			| /* EMPTY */
+					{ $$ = NIL; }
+		;
+
+opt_transaction_chain:
+			AND CHAIN		{ $$ = true; }
+			| AND NO CHAIN	{ $$ = false; }
+			| /* EMPTY */	{ $$ = false; }
+		;
 
 /*****************************************************************************
  *

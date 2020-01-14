@@ -735,3 +735,57 @@ export enum OverridingKind
 	OVERRIDING_USER_VALUE,
 	OVERRIDING_SYSTEM_VALUE
 }
+
+/* ----------------------
+ *		{Begin|Commit|Rollback} Transaction Statement
+ * ----------------------
+ */
+export enum TransactionStmtKind
+{
+	TRANS_STMT_BEGIN,
+	TRANS_STMT_START,			/* semantically identical to BEGIN */
+	TRANS_STMT_COMMIT,
+	TRANS_STMT_ROLLBACK,
+	TRANS_STMT_SAVEPOINT,
+	TRANS_STMT_RELEASE,
+	TRANS_STMT_ROLLBACK_TO,
+	TRANS_STMT_PREPARE,
+	TRANS_STMT_COMMIT_PREPARED,
+	TRANS_STMT_ROLLBACK_PREPARED
+}
+
+export interface TransactionStmt extends Node<NodeTag.T_TransactionStmt>
+{
+	kind: TransactionStmtKind;	/* see above */
+	options: unknown;		/* for BEGIN/START commands */
+	savepoint_name: string; /* for savepoint commands */
+	gid: string;			/* for two-phase-commit related commands */
+	chain: boolean;			/* AND CHAIN option */
+}
+
+/*
+ * DefElem - a generic "name = value" option definition
+ *
+ * In some contexts the name can be qualified.  Also, certain SQL commands
+ * allow a SET/ADD/DROP action to be attached to option settings, so it's
+ * convenient to carry a field for that too.  (Note: currently, it is our
+ * practice that the grammar allows namespace and action only in statements
+ * where they are relevant; C code can just ignore those fields in other
+ * statements.)
+ */
+export enum DefElemAction
+{
+	DEFELEM_UNSPEC,				/* no action given */
+	DEFELEM_SET,
+	DEFELEM_ADD,
+	DEFELEM_DROP
+} DefElemAction;
+
+export interface DefElem extends Node<NodeTag.T_DefElem>
+{
+	defnamespace: string | null;	/* NULL if unqualified name */
+	defname: string;
+	arg: Value<any> | TypeName;			/* a (Value *) or a (TypeName *) */
+	defaction: DefElemAction;	/* unspecified action, or SET/ADD/DROP */
+	location: number;		/* token location, or -1 if unknown */
+}
