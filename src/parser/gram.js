@@ -377,22 +377,22 @@
  */
 
 
-import * as nodes from '../nodes/index';
-import * as parser from './index';
-import * as common from '../common/index';
-import * as utils from '../utils/index';
+import * as __nodes from '../nodes/index.js';
+import * as __parser from './index.js';
+import * as __common from '../common/index.js';
+import * as __utils from '../utils/index.js';
 
-import { ereport, errcode, errmsg, parser_errposition } from './src/common/errors.js';
+import { ereport, errcode, errmsg, parser_errposition } from '../common/errors.js';
 
 const NULL = null;
 const NIL = null;
 const yyscanner = null;
 
 const _ = {
-	...nodes,
-	...parser,
-	...common,
-	...utils
+	...__nodes,
+	...__parser,
+	...__common,
+	...__utils
 };
 
 

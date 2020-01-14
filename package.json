@@ -9,12 +9,15 @@
   },
   "author": "Abbas Mashayekh <martianboy2005@gmail.com>",
   "license": "MIT",
-  "dependencies": {
-  },
+  "dependencies": {},
   "devDependencies": {
     "@zoltu/typescript-transformer-append-js-extension": "^1.0.1",
     "pg-query-parser": "^0.2.4",
-    "jison-gho": "^0.6.1-216",
+    "@gerhobbelt/ast-util": "0.6.1-4",
+    "@gerhobbelt/json5": "^2.1.0-48",
+    "@gerhobbelt/nomnom": "1.8.4-29",
+    "@gerhobbelt/recast": "0.13.0-24",
+    "@gerhobbelt/xregexp": "^4.2.0-30",
     "ttypescript": "^1.5.10",
     "typescript": "^3.7.3"
   }
