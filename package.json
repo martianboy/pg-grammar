@@ -1,20 +1,20 @@
 {
-  "name": "pg-parser",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "pg-grammar",
+  "version": "0.6.0",
+  "description": "A direct port of PostgreSQL's SQL parser to Javascript",
+  "type": "module",
+  "module": "dist/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
-  "license": "ISC",
-  "type": "module",
+  "author": "Abbas Mashayekh <martianboy2005@gmail.com>",
+  "license": "MIT",
   "dependencies": {
-    "jison-gho": "^0.6.1-216",
-    "pg-query-parser": "^0.2.4"
   },
   "devDependencies": {
     "@zoltu/typescript-transformer-append-js-extension": "^1.0.1",
+    "pg-query-parser": "^0.2.4",
+    "jison-gho": "^0.6.1-216",
     "ttypescript": "^1.5.10",
     "typescript": "^3.7.3"
   }

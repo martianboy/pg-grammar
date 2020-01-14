@@ -1,10 +1,9 @@
-all: parser ts
-
-parser: pg.js
+all: ts parser
 
 ts:
 	npx ttsc --project tsconfig.json
 
-pg.js:
-	./node_modules/.bin/jison pg.jison pg.jisonlex --module-type es --outfile pg.js
-	patch pg.js patches/00-bt.patch
+parser:
+	node ./build.js
+	cp ./src/parser/parse.js ./dist/parser/parse.js
+	cp ./src/parser/gram.js ./dist/parser/gram.js

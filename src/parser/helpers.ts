@@ -1,4 +1,4 @@
-import { Node, IsA } from '../nodes/node';
+import { Node } from '../nodes/node';
 import { SelectStmt, WithClause, Indirection } from "../nodes/parsenodes";
 import { ereport, errcode, errmsg, parser_errposition, ERROR, ERRCODE_SYNTAX_ERROR } from '../common/errors';
 import { exprLocation } from '../nodes/nodefuncs';
@@ -66,9 +66,10 @@ export function insertSelectOptions(stmt: SelectStmt,
  * We only allow '*' at the end of the list, but it's hard to enforce that
  * in the grammar, so do it here.
  */
-export function
-check_indirection(indirection: Indirection[], yyscanner: unknown): unknown[]
+export function check_indirection(indirection: Indirection[] | null, yyscanner: unknown): Indirection[] | null
 {
+	if (!indirection) return null;
+
 	const idx = indirection.findIndex(l => l.type === NodeTag.T_A_Star)
 
 	if (idx > -1 && idx < indirection.length - 1) {

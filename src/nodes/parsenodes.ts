@@ -607,6 +607,52 @@ export interface GroupingSet extends Node<NodeTag.T_GroupingSet>
 }
 
 
+/* ----------------------
+ *		Insert Statement
+ *
+ * The source expression is represented by SelectStmt for both the
+ * SELECT and VALUES cases.  If selectStmt is NULL, then the query
+ * is INSERT ... DEFAULT VALUES.
+ * ----------------------
+ */
+export interface InsertStmt extends Node<NodeTag.T_InsertStmt>
+{
+	relation: RangeVar;		/* relation to insert into */
+	cols: unknown[];			/* optional: names of the target columns */
+	selectStmt: SelectStmt | null;		/* the source SELECT/VALUES, or NULL */
+	onConflictClause?: OnConflictClause | null; /* ON CONFLICT clause */
+	returningList?: unknown[] | null;	/* list of expressions to return */
+	withClause?: WithClause | null;		/* WITH clause */
+	override: OverridingKind;	/* OVERRIDING clause */
+}
+
+/* ----------------------
+ *		Delete Statement
+ * ----------------------
+ */
+export interface DeleteStmt extends Node<NodeTag.T_DeleteStmt>
+{
+	relation: RangeVar;		/* relation to delete from */
+	usingClause?: unknown[] | null;	/* optional using clause for more tables */
+	whereClause?: unknown | null;	/* qualifications */
+	returningList?: unknown[] | null;	/* list of expressions to return */
+	withClause?: WithClause | null;		/* WITH clause */
+}
+
+/* ----------------------
+ *		Update Statement
+ * ----------------------
+ */
+export interface UpdateStmt extends Node<NodeTag.T_UpdateStmt>
+{
+	relation: RangeVar;		/* relation to update */
+	targetList: unknown[];		/* the target list (of ResTarget) */
+	whereClause: unknown;	/* qualifications */
+	fromClause: unknown[];		/* optional from clause for more tables */
+	returningList: unknown[];	/* list of expressions to return */
+	withClause: WithClause;		/* WITH clause */
+}
+
 export interface BaseSelectStmt extends Node<NodeTag.T_SelectStmt> {
 	/*
 	 * These fields are used in both "leaf" SelectStmts and upper-level
@@ -656,3 +702,36 @@ interface UpperLevelSelectStmt extends BaseSelectStmt {
 }
 
 export type SelectStmt = LeafSelectStmt | UpperLevelSelectStmt;
+
+/* ----------------------
+ *		Declare Cursor Statement
+ *
+ * The "query" field is initially a raw parse tree, and is converted to a
+ * Query node during parse analysis.  Note that rewriting and planning
+ * of the query are always postponed until execution.
+ * ----------------------
+ */
+export const CURSOR_OPT_BINARY =		0x0001	/* BINARY */
+export const CURSOR_OPT_SCROLL =		0x0002	/* SCROLL explicitly given */
+export const CURSOR_OPT_NO_SCROLL =		0x0004	/* NO SCROLL explicitly given */
+export const CURSOR_OPT_INSENSITIVE =	0x0008	/* INSENSITIVE */
+export const CURSOR_OPT_HOLD =			0x0010	/* WITH HOLD */
+/* these planner-control flags do not correspond to any SQL grammar: */
+export const CURSOR_OPT_FAST_PLAN =		0x0020	/* prefer fast-start plan */
+export const CURSOR_OPT_GENERIC_PLAN =	0x0040	/* force use of generic plan */
+export const CURSOR_OPT_CUSTOM_PLAN =	0x0080	/* force use of custom plan */
+export const CURSOR_OPT_PARALLEL_OK =	0x0100	/* parallel mode OK */
+
+export interface DeclareCursorStmt extends Node<NodeTag.T_DeclareCursorStmt>
+{
+	portalname: string;		/* name of the portal (cursor) */
+	options: number;		/* bitmask of options (see above) */
+	query: SelectStmt;			/* the query (see comments above) */
+}
+
+export enum OverridingKind
+{
+	OVERRIDING_NOT_SET,
+	OVERRIDING_USER_VALUE,
+	OVERRIDING_SYSTEM_VALUE
+}

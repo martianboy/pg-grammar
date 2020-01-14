@@ -15,6 +15,15 @@
             "args": [
                 "test.sql"
             ]
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Build Parser",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}/build.js"
         }
     ]
 }

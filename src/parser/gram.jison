@@ -1,10 +1,22 @@
 %code imports {
-import * as _ from './src/index.js';
-import { ereport, errcode, errmsg, parser_errposition } from './src/common/errors.js';
+import * as __nodes from '../nodes/index.js';
+import * as __parser from './index.js';
+import * as __common from '../common/index.js';
+import * as __utils from '../utils/index.js';
+
+import { ereport, errcode, errmsg, parser_errposition } from '../common/errors.js';
 
 const NULL = null;
 const NIL = null;
 const yyscanner = null;
+
+const _ = {
+	...__nodes,
+	...__parser,
+	...__common,
+	...__utils
+};
+
 }
 
 %{
@@ -79,7 +91,7 @@ function IsA(arg, nodeTag) {
 	DOUBLE_P DROP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPTED END_P ENUM_P ESCAPE EVENT EXCEPT
-	EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN
+	EXCLUDE EXCLUDING EXCLUSIVE EXECUTE EXISTS EXPLAIN EXPRESSION
 	EXTENSION EXTERNAL EXTRACT
 
 	FALSE_P FAMILY FETCH FILTER FIRST_P FLOAT_P FOLLOWING FOR
@@ -161,6 +173,9 @@ function IsA(arg, nodeTag) {
  */
 %token		NOT_LA NULLS_LA WITH_LA
 
+
+/* Precedence: lowest to highest */
+%nonassoc	SET				/* see relation_expr_opt_alias */
 %left		UNION EXCEPT
 %left		INTERSECT
 %left		OR
@@ -171,6 +186,33 @@ function IsA(arg, nodeTag) {
 %nonassoc	BETWEEN IN_P LIKE ILIKE SIMILAR NOT_LA
 %nonassoc	ESCAPE			/* ESCAPE must be just above LIKE/ILIKE/SIMILAR */
 %left		POSTFIXOP		/* dummy for postfix Op rules */
+/*
+ * To support target_el without AS, we must give IDENT an explicit priority
+ * between POSTFIXOP and Op.  We can safely assign the same priority to
+ * various unreserved keywords as needed to resolve ambiguities (this can't
+ * have any bad effects since obviously the keywords will still behave the
+ * same as if they weren't keywords).  We need to do this:
+ * for PARTITION, RANGE, ROWS, GROUPS to support opt_existing_window_name;
+ * for RANGE, ROWS, GROUPS so that they can follow a_expr without creating
+ * postfix-operator problems;
+ * for GENERATED so that it can follow b_expr;
+ * and for NULL so that it can follow b_expr in ColQualList without creating
+ * postfix-operator problems.
+ *
+ * To support CUBE and ROLLUP in GROUP BY without reserving them, we give them
+ * an explicit priority lower than '(', so that a rule with CUBE '(' will shift
+ * rather than reducing a conflicting rule that takes CUBE as a function name.
+ * Using the same precedence as IDENT seems right for the reasons given above.
+ *
+ * The frame_bound productions UNBOUNDED PRECEDING and UNBOUNDED FOLLOWING
+ * are even messier: since UNBOUNDED is an unreserved keyword (per spec!),
+ * there is no principled way to distinguish these from the productions
+ * a_expr PRECEDING/FOLLOWING.  We hack this up by giving UNBOUNDED slightly
+ * lower precedence than PRECEDING and FOLLOWING.  At present this doesn't
+ * appear to cause UNBOUNDED to be treated differently from other unreserved
+ * keywords anywhere else in the grammar, but it's definitely risky.  We can
+ * blame any funny behavior of UNBOUNDED on the SQL standard, though.
+ */
 %nonassoc	UNBOUNDED		/* ideally should have same precedence as IDENT */
 %nonassoc	IDENT GENERATED NULL_P PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
 %left		Op OPERATOR		/* multi-character ops and user-defined operators */
@@ -185,10 +227,52 @@ function IsA(arg, nodeTag) {
 %left		'(' ')'
 %left		TYPECAST
 %left		'.'
+/*
+ * These might seem to be low-precedence, but actually they are not part
+ * of the arithmetic hierarchy at all in their use as JOIN operators.
+ * We make them high-precedence to support their use as function names.
+ * They wouldn't be given a precedence at all, were it not that we need
+ * left-associativity among the JOIN rules themselves.
+ */
+%left		JOIN CROSS LEFT FULL RIGHT INNER_P NATURAL
+/* kluge to keep xml_whitespace_option from causing shift/reduce conflicts */
+%right		PRESERVE STRIP_P
 
 %start stmtblock
 
 %%
+
+stmtblock:	stmtmulti       { return $1; }
+            | stmtmulti EOF { return $1; }
+        ;
+
+stmtmulti:	stmtmulti ';' stmt
+				{
+					if ($1 != null)
+					{
+						/* update length of previous stmt */
+						updateRawStmtEnd($1[$1.length - 1], @2);
+					}
+					if ($3 != null) {
+						$1.push(makeRawStmt($3, @2));
+						$$ = $1;
+					} else
+						$$ = $1;
+				}
+			| stmt
+				{
+					if ($1 != null)
+						$$ = [makeRawStmt($1, null)];
+					else
+						$$ = null;
+				}
+		;
+
+stmt:
+	SelectStmt
+	| UpdateStmt
+	| InsertStmt
+	| /* EMPTY */ { $$ = null };
 
 unreserved_keyword:
 			  ABORT_P
@@ -274,6 +358,7 @@ unreserved_keyword:
 			| EXCLUSIVE
 			| EXECUTE
 			| EXPLAIN
+			| EXPRESSION
 			| EXTENSION
 			| EXTERNAL
 			| FAMILY
@@ -549,38 +634,11 @@ col_name_keyword:
 			| XMLTABLE
 		;
 
-stmtblock:	stmtmulti       { return $1; }
-            | stmtmulti EOF { return $1; }
-        ;
-
-stmtmulti:	stmtmulti ';' stmt
-				{
-					if ($1 != null)
-					{
-						/* update length of previous stmt */
-						updateRawStmtEnd($1[$1.length - 1], @2);
-					}
-					if ($3 != null) {
-						$1.push(makeRawStmt($3, @2));
-						$$ = $1;
-					} else
-						$$ = $1;
-				}
-			| stmt
-				{
-					if ($1 != null)
-						$$ = [makeRawStmt($1, null)];
-					else
-						$$ = null;
-				}
-		;
-
-stmt:
-	SelectStmt
-	| /* EMPTY */ { $$ = null };
-
 PreparableStmt:
 			SelectStmt
+			| InsertStmt
+			| UpdateStmt
+			| DeleteStmt					/* by default all are $$=$1 */
 		;
 
 /* A complete SELECT statement looks like this.
@@ -1098,11 +1156,258 @@ set_clause_list:
 			| set_clause_list ',' set_clause	{ $$ = $1.concat($3 || []); }
 		;
 
+set_clause:
+			set_target '=' a_expr
+				{
+					$1.val = $3;
+					$$ = [$1];
+				}
+			| '(' set_target_list ')' '=' a_expr
+				{
+					var ncolumns = $2.length;
+					var i = 1;
+					var col_cell;
+
+					/* Create a MultiAssignRef source for each target */
+					for (col_cell of $2)
+					{
+						/** @type {ResTarget} */
+						var res_col = col_cell;
+
+						res_col.val = {
+							type: _.NodeTag.T_MultiAssignRef,
+							source: $5,
+							colno: i,
+							ncolumns
+						};
+						i++;
+					}
+
+					$$ = $2;
+				}
+		;
+
+set_target:
+			ColId opt_indirection
+				{
+					$$ = {
+						type: _.NodeTag.T_ResTarget,
+						name: $1,
+						indirection: _.check_indirection($2, yyscanner),
+						val: NULL,	/* upper production sets this */
+						location: @1
+					};
+				}
+		;
+
 set_target_list:
 			set_target								{ $$ = [$1]; }
 			| set_target_list ',' set_target		{ $$ = $1; $1.push($3); }
 		;
 
+/*****************************************************************************
+ *
+ *		QUERY:
+ *				CURSOR STATEMENTS
+ *
+ *****************************************************************************/
+DeclareCursorStmt: DECLARE cursor_name cursor_options CURSOR opt_hold FOR SelectStmt
+				{
+					$$ = {
+						type: NodeTag.T_DeclareCursorStmt,
+						portalname: $2,
+						/* currently we always set FAST_PLAN option */
+						options: $3 | $5 | _.CURSOR_OPT_FAST_PLAN,
+						query: $7,
+					};
+				}
+		;
+
+cursor_name:	name						{ $$ = $1; }
+		;
+
+cursor_options: /*EMPTY*/					{ $$ = 0; }
+			| cursor_options NO SCROLL		{ $$ = $1 | _.CURSOR_OPT_NO_SCROLL; }
+			| cursor_options SCROLL			{ $$ = $1 | _.CURSOR_OPT_SCROLL; }
+			| cursor_options BINARY			{ $$ = $1 | _.CURSOR_OPT_BINARY; }
+			| cursor_options INSENSITIVE	{ $$ = $1 | _.CURSOR_OPT_INSENSITIVE; }
+		;
+
+opt_hold: /* EMPTY */						{ $$ = 0; }
+			| WITH HOLD						{ $$ = _.CURSOR_OPT_HOLD; }
+			| WITHOUT HOLD					{ $$ = 0; }
+		;
+
+
+/*****************************************************************************
+ *
+ *		QUERY:
+ *				INSERT STATEMENTS
+ *
+ *****************************************************************************/
+
+InsertStmt:
+			opt_with_clause INSERT INTO insert_target insert_rest
+			opt_on_conflict returning_clause
+				{
+					$5.relation = $4;
+					$5.onConflictClause = $6;
+					$5.returningList = $7;
+					$5.withClause = $1;
+					$$ = $5;
+				}
+		;
+
+/*
+ * Can't easily make AS optional here, because VALUES in insert_rest would
+ * have a shift/reduce conflict with VALUES as an optional alias.  We could
+ * easily allow unreserved_keywords as optional aliases, but that'd be an odd
+ * divergence from other places.  So just require AS for now.
+ */
+insert_target:
+			qualified_name
+				{
+					$$ = $1;
+				}
+			| qualified_name AS ColId
+				{
+					$1.alias = _.makeAlias($3, NIL);
+					$$ = $1;
+				}
+		;
+
+insert_rest:
+			SelectStmt
+				{
+					$$ = {
+						type: _.NodeTag.T_InsertStmt,
+						cols: NIL,
+						selectStmt: $1,
+					}
+				}
+			| OVERRIDING override_kind VALUE_P SelectStmt
+				{
+					$$ = {
+						type: _.NodeTag.T_InsertStmt,
+						cols: NIL,
+						override: $2,
+						selectStmt: $4,
+					}
+				}
+			| '(' insert_column_list ')' SelectStmt
+				{
+					$$ = {
+						type: _.NodeTag.T_InsertStmt,
+						cols: $2,
+						selectStmt: $4,
+					}
+				}
+			| '(' insert_column_list ')' OVERRIDING override_kind VALUE_P SelectStmt
+				{
+					$$ = {
+						type: _.NodeTag.T_InsertStmt,
+						cols: $2,
+						override: $5,
+						selectStmt: $7,
+					}
+				}
+			| DEFAULT VALUES
+				{
+					$$ = {
+						type: _.NodeTag.T_InsertStmt,
+						cols: NIL,
+						selectStmt: NULL,
+					}
+				}
+		;
+
+override_kind:
+			USER		{ $$ = _.OverridingKind.OVERRIDING_USER_VALUE; }
+			| SYSTEM_P	{ $$ = _.OverridingKind.OVERRIDING_SYSTEM_VALUE; }
+		;
+
+insert_column_list:
+			insert_column_item
+					{ $$ = [$1]; }
+			| insert_column_list ',' insert_column_item
+					{ $$ = $1; $1.push($3); }
+		;
+
+insert_column_item:
+			ColId opt_indirection
+				{
+					$$ = {
+						type: _.NodeTag.T_ResTarget,
+						name: $1,
+						indirection: _.check_indirection($2, yyscanner),
+						val: NULL,
+						location: @1,
+					};
+				}
+		;
+
+opt_on_conflict:
+			ON CONFLICT opt_conf_expr DO UPDATE SET set_clause_list	where_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_OnConflictClause,
+						action:_.OnConflictAction.ONCONFLICT_UPDATE,
+						infer: $3,
+						targetList: $7,
+						whereClause: $8,
+						location: @1,
+					};
+				}
+			|
+			ON CONFLICT opt_conf_expr DO NOTHING
+				{
+					$$ = {
+						type: _.NodeTag.T_OnConflictClause,
+						action:_.OnConflictAction.ONCONFLICT_NOTHING,
+						infer: $3,
+						targetList: NIL,
+						whereClause: NULL,
+						location: @1,
+					};
+				}
+			| /*EMPTY*/
+				{
+					$$ = NULL;
+				}
+		;
+
+opt_conf_expr:
+			'(' index_params ')' where_clause
+				{
+					$$ = {
+						type: _.NodeTag.T_InferClause,
+						indexElems: $2,
+						whereClause: $4,
+						conname: NULL,
+						location: @1,
+					};
+				}
+			|
+			ON CONSTRAINT name
+				{
+					$$ = {
+						type: _.NodeTag.T_InferClause,
+						indexElems: NIL,
+						whereClause: NULL,
+						conname: $3,
+						location: @1,
+					};
+				}
+			| /*EMPTY*/
+				{
+					$$ = NULL;
+				}
+		;
+
+returning_clause:
+			RETURNING target_list		{ $$ = $2; }
+			| /* EMPTY */				{ $$ = NIL; }
+		;
 
 /*****************************************************************************
  *
@@ -1481,6 +1786,7 @@ relation_expr_list:
 relation_expr_opt_alias: relation_expr					%prec UMINUS
 				{
 					$$ = $1;
+					console.log('1', $$);
 				}
 			| relation_expr ColId
 				{
@@ -1488,7 +1794,9 @@ relation_expr_opt_alias: relation_expr					%prec UMINUS
 					$1.alias = {
 						type: _.NodeTag.T_Alias,
 						aliasname: $2
-					}
+					};
+
+					console.log('2', $1);
 				}
 			| relation_expr AS ColId
 				{
@@ -1496,7 +1804,10 @@ relation_expr_opt_alias: relation_expr					%prec UMINUS
 					$1.alias = {
 						type: _.NodeTag.T_Alias,
 						aliasname: $3
-					}
+					};
+
+					console.log('3', $$);
+
 				}
 		;
 
@@ -1945,9 +2256,9 @@ Typename:	SimpleTypename opt_array_bounds
 
 opt_array_bounds:
 			opt_array_bounds '[' ']'
-					{  $$ = $1; $1.push(_.makeInteger(-1)); }
+					{  $$ = $1 || []; $$.push(_.makeInteger(-1)); }
 			| opt_array_bounds '[' Iconst ']'
-					{  $$ = $1; $1.push(_.makeInteger($3)); }
+					{  $$ = $1 || []; $$.push(_.makeInteger($3)); }
 			| /*EMPTY*/
 					{  $$ = NIL; }
 		;
@@ -4038,7 +4349,7 @@ target_el:	a_expr AS ColLabel
  *****************************************************************************/
 
 qualified_name_list:
-			qualified_name							{ $$ = [$1]; }
+			qualified_name							 { $$ = [$1]; }
 			| qualified_name_list ',' qualified_name { $$ = $1; $1.push($3); }
 		;
 

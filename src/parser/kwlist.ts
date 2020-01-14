@@ -140,6 +140,7 @@ export const keywordlist = [
     PG_KEYWORD("execute", 'EXECUTE', ScanKeywordCategory.UNRESERVED_KEYWORD),
     PG_KEYWORD("exists", 'EXISTS', ScanKeywordCategory.COL_NAME_KEYWORD),
     PG_KEYWORD("explain", 'EXPLAIN', ScanKeywordCategory.UNRESERVED_KEYWORD),
+    PG_KEYWORD("expression", 'EXPRESSION', ScanKeywordCategory.UNRESERVED_KEYWORD),
     PG_KEYWORD("extension", 'EXTENSION', ScanKeywordCategory.UNRESERVED_KEYWORD),
     PG_KEYWORD("external", 'EXTERNAL', ScanKeywordCategory.UNRESERVED_KEYWORD),
     PG_KEYWORD("extract", 'EXTRACT', ScanKeywordCategory.COL_NAME_KEYWORD),
